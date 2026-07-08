@@ -150,7 +150,7 @@ function construirMensajeOferta(pedido, importeEditor) {
     `💰 Importe para el editor: ${importeEditor} €\n\n` +
     '⚠️ Nota: Por políticas de privacidad, los datos del cliente y el material original se gestionan de forma privada una vez asignado el cargo y verificado el correspondiente acuerdo de colaboración firmado.\n\n' +
     '🎯 ¿TE INTERESA ESTA COLABORACIÓN?\n' +
-    'Si tienes disponibilidad para cargarte de este proyecto de forma externa, responde directamente a este mensaje indicando el Nº de Pedido para proceder con la asignación. ¡A por ello! 💪\n' +
+    'Usa la función "Responder" de Discord sobre ESTE mensaje (no escribas un mensaje nuevo en el canal) para apuntarte. Se asigna al primero que responda así. ¡A por ello! 💪\n' +
     `${SEPARADOR}`
   );
 }
