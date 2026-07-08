@@ -6,8 +6,9 @@
 //   3. Cerrar la oferta (editar el mismo mensaje para avisar de que ya está asignado) cuando
 //      el pedido está en "2. Reunión Agendada", ya tiene "Editor principal" asignado, y
 //      todavía no se avisó ("Aviso Discord enviado" = false).
-//   4. Borrar el mensaje de Discord cuando el pedido está "7. Finalizado y Entregado" y
-//      todavía no se borró ("Discord eliminado" = false).
+//   4. Borrar el mensaje de Discord (y las respuestas que le hicieron, para no dejar restos
+//      sueltos) cuando el pedido está "7. Finalizado y Entregado" y todavía no se borró
+//      ("Discord eliminado" = false).
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -93,16 +94,19 @@ async function editarMensajeDiscord(mensajeId, body) {
   }
 }
 
-async function obtenerPrimeraRespuesta(mensajeId) {
+async function obtenerRespuestas(mensajeId) {
   const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages?after=${mensajeId}&limit=100`;
   const response = await fetch(url, { headers: headersDiscord() });
   const data = await response.json();
   if (!response.ok) throw new Error('Error leyendo mensajes de Discord: ' + JSON.stringify(data));
 
-  const respuestas = data
+  return data
     .filter((m) => m.message_reference && m.message_reference.message_id === mensajeId)
     .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+}
 
+async function obtenerPrimeraRespuesta(mensajeId) {
+  const respuestas = await obtenerRespuestas(mensajeId);
   return respuestas[0] || null;
 }
 
@@ -323,9 +327,14 @@ async function procesarBorrados() {
 
   for (const pedido of pedidos) {
     try {
+      const respuestas = await obtenerRespuestas(pedido.mensajeId);
+      for (const respuesta of respuestas) {
+        await borrarMensajeDiscord(respuesta.id);
+        await esperar(500);
+      }
       await borrarMensajeDiscord(pedido.mensajeId);
       await actualizarNotion(pedido.pageId, { 'Discord eliminado': { checkbox: true } });
-      log(`Borrado mensaje de PED-${pedido.numeroPedido}`);
+      log(`Borrado mensaje de PED-${pedido.numeroPedido} y ${respuestas.length} respuesta(s) asociada(s)`);
       await esperar(1500);
     } catch (err) {
       log(`Error borrando mensaje de PED-${pedido.numeroPedido}: ${err.message}`);
