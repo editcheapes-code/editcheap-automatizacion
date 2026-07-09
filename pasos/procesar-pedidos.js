@@ -16,9 +16,7 @@
 //
 // Ejecutar: node pasos/procesar-pedidos.js
 
-const { google } = require('googleapis');
 const PDFDocument = require('pdfkit');
-const { Readable } = require('stream');
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_DATA_SOURCE_ID = process.env.NOTION_DATA_SOURCE_ID;
@@ -26,8 +24,9 @@ const NOTION_EDITORES_DATA_SOURCE_ID = '39151046-61ea-80a0-b77d-000b5e2875d8';
 const NOTION_FACTURAS_DATA_SOURCE_ID = '974452ae-34ca-4d1c-9b8a-a177dda689fb';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL;
+const GOOGLE_APPS_SCRIPT_SECRET = process.env.GOOGLE_APPS_SCRIPT_SECRET;
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -503,26 +502,19 @@ function generarPDFFactura(datos) {
 }
 
 async function subirPDFAGoogleDrive(buffer, nombreArchivo) {
-  const credenciales = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
-  const auth = new google.auth.GoogleAuth({
-    credentials: credenciales,
-    scopes: ['https://www.googleapis.com/auth/drive'],
+  const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      secreto: GOOGLE_APPS_SCRIPT_SECRET,
+      carpetaId: GOOGLE_DRIVE_FOLDER_ID,
+      nombreArchivo,
+      pdfBase64: buffer.toString('base64'),
+    }),
   });
-  const drive = google.drive({ version: 'v3', auth });
-
-  const respuesta = await drive.files.create({
-    requestBody: {
-      name: nombreArchivo,
-      parents: [GOOGLE_DRIVE_FOLDER_ID],
-    },
-    media: {
-      mimeType: 'application/pdf',
-      body: Readable.from(buffer),
-    },
-    fields: 'id, webViewLink',
-  });
-
-  return respuesta.data.webViewLink || `https://drive.google.com/file/d/${respuesta.data.id}/view`;
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error('Error subiendo PDF a Drive: ' + JSON.stringify(data));
+  return data.url;
 }
 
 async function procesarFacturas() {

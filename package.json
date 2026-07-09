@@ -4,7 +4,6 @@
   "private": true,
   "description": "Automatización EDITCHEAP: Notion, Discord y facturas en PDF a Google Drive.",
   "dependencies": {
-    "googleapis": "^144.0.0",
     "pdfkit": "^0.15.1"
   }
 }
