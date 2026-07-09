@@ -33,9 +33,32 @@ function textoDe(propiedad) {
   return propiedad.rich_text.map((t) => t.plain_text).join('');
 }
 
-function multiSelectDe(propiedad) {
-  if (!propiedad || !propiedad.multi_select || propiedad.multi_select.length === 0) return '(sin especificar)';
-  return propiedad.multi_select.map((o) => o.name).join(', ');
+async function obtenerPaginaNotion(pageId) {
+  const url = `https://api.notion.com/v1/pages/${pageId}`;
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+    },
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error leyendo página de Notion: ' + JSON.stringify(data));
+  return data;
+}
+
+// "Servicios web" es una relación a "🧾 Catálogo de Servicios" (permite elegir variantes ×2, ×3...
+// del mismo servicio en vez de repetir la misma etiqueta, que Notion no permite).
+async function nombresServiciosDe(propiedadRelacion) {
+  if (!propiedadRelacion || !propiedadRelacion.relation || propiedadRelacion.relation.length === 0) {
+    return '(sin especificar)';
+  }
+  const nombres = [];
+  for (const rel of propiedadRelacion.relation) {
+    const pagina = await obtenerPaginaNotion(rel.id);
+    const titulo = pagina.properties['Nombre'];
+    nombres.push(titulo && titulo.title && titulo.title.length > 0 ? titulo.title.map((t) => t.plain_text).join('') : '(servicio sin nombre)');
+  }
+  return nombres.join(', ');
 }
 
 async function consultarNotion(filter) {
@@ -181,16 +204,18 @@ async function obtenerPedidosParaPublicar() {
       { property: 'ID Mensaje', rich_text: { is_empty: true } },
     ],
   });
-  return resultados.map((pedido) => {
+  const pedidos = [];
+  for (const pedido of resultados) {
     const p = pedido.properties;
-    return {
+    pedidos.push({
       pageId: pedido.id,
       numeroPedido: p['Nº de Pedido'].unique_id.number,
-      tipoServicio: multiSelectDe(p['Servicios web']),
+      tipoServicio: await nombresServiciosDe(p['Servicios web']),
       deseoCliente: textoDe(p['Deseo del cliente']),
       montoTotal: p['Monto total (€)'].formula.number,
-    };
-  });
+    });
+  }
+  return pedidos;
 }
 
 async function procesarPublicaciones() {
@@ -272,17 +297,19 @@ async function obtenerPedidosParaCerrar() {
       { property: 'ID Mensaje', rich_text: { is_not_empty: true } },
     ],
   });
-  return resultados.map((pedido) => {
+  const pedidos = [];
+  for (const pedido of resultados) {
     const p = pedido.properties;
-    return {
+    pedidos.push({
       pageId: pedido.id,
       numeroPedido: p['Nº de Pedido'].unique_id.number,
       mensajeId: textoDe(p['ID Mensaje']),
-      tipoServicio: multiSelectDe(p['Servicios web']),
+      tipoServicio: await nombresServiciosDe(p['Servicios web']),
       deseoCliente: textoDe(p['Deseo del cliente']),
       importeEditor: p['Importe Editor (€)'].number,
-    };
-  });
+    });
+  }
+  return pedidos;
 }
 
 async function procesarCierres() {
