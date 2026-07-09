@@ -467,6 +467,7 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
       secreto: GOOGLE_APPS_SCRIPT_SECRET,
       carpetaId: GOOGLE_DRIVE_FOLDER_ID,
       nombreArchivo,
+      tipoFactura: datos.tipo,
       datos: {
         NUMERO_FACTURA: `FACT-${datos.numeroFactura}`,
         TIPO: datos.tipo === 'Cliente' ? 'Factura a cliente' : 'Pago a editor',
