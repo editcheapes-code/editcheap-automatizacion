@@ -9,16 +9,25 @@
 //   4. Borrar el mensaje de Discord (y las respuestas que le hicieron, para no dejar restos
 //      sueltos) cuando el pedido está "7. Finalizado y Entregado" y todavía no se borró
 //      ("Discord eliminado" = false).
+//   5. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
+//      a la carpeta de Google Drive compartida con la cuenta de servicio.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
 // Ejecutar: node pasos/procesar-pedidos.js
 
+const { google } = require('googleapis');
+const PDFDocument = require('pdfkit');
+const { Readable } = require('stream');
+
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_DATA_SOURCE_ID = process.env.NOTION_DATA_SOURCE_ID;
 const NOTION_EDITORES_DATA_SOURCE_ID = '39151046-61ea-80a0-b77d-000b5e2875d8';
+const NOTION_FACTURAS_DATA_SOURCE_ID = '974452ae-34ca-4d1c-9b8a-a177dda689fb';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -369,11 +378,179 @@ async function procesarBorrados() {
   }
 }
 
+// ---------- FASE 5: generar PDF de facturas y subirlo a Google Drive ----------
+
+function primerIdRelacion(propiedad) {
+  if (!propiedad || !propiedad.relation || propiedad.relation.length === 0) return null;
+  return propiedad.relation[0].id;
+}
+
+function tituloDePagina(pagina, nombrePropiedad) {
+  const prop = pagina.properties[nombrePropiedad];
+  if (!prop || !prop.title || prop.title.length === 0) return '(sin nombre)';
+  return prop.title.map((t) => t.plain_text).join('');
+}
+
+async function consultarFacturas(filter) {
+  const url = `https://api.notion.com/v1/data_sources/${NOTION_FACTURAS_DATA_SOURCE_ID}/query`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ filter }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error consultando facturas en Notion: ' + JSON.stringify(data));
+  return data.results;
+}
+
+async function obtenerFacturasParaPDF() {
+  return consultarFacturas({
+    and: [
+      { property: 'Generar PDF', checkbox: { equals: true } },
+      { property: 'Enlace PDF', url: { is_empty: true } },
+    ],
+  });
+}
+
+async function construirDatosFactura(factura) {
+  const f = factura.properties;
+  const tipo = f['Tipo'].select ? f['Tipo'].select.name : null;
+  const pedidoId = primerIdRelacion(f['Pedido']);
+  if (!pedidoId) throw new Error('la factura no tiene ningún pedido enlazado');
+
+  const pedido = await obtenerPaginaNotion(pedidoId);
+  const p = pedido.properties;
+
+  let nombreCliente = '(sin cliente asignado)';
+  let contactoCliente = '';
+  const clienteId = primerIdRelacion(p['Cliente']);
+  if (clienteId) {
+    const cliente = await obtenerPaginaNotion(clienteId);
+    nombreCliente = tituloDePagina(cliente, 'Nombre del Cliente');
+    contactoCliente = textoDe(cliente.properties['Contacto / Red']);
+  }
+
+  let nombreEditor = '(sin editor asignado)';
+  const editorId = primerIdRelacion(p['Editor principal']);
+  if (editorId) {
+    const editor = await obtenerPaginaNotion(editorId);
+    nombreEditor = tituloDePagina(editor, 'Nombre');
+  }
+
+  const montoTotal = p['Monto total (€)'].formula.number || 0;
+  const importeEditor = p['Importe Editor (€)'].number || 0;
+
+  return {
+    numeroFactura: f['Nº Factura'].unique_id.number,
+    tipo,
+    fecha: f['Fecha'].date ? f['Fecha'].date.start : null,
+    numeroPedido: p['Nº de Pedido'].unique_id.number,
+    nombreCliente,
+    contactoCliente,
+    nombreEditor,
+    servicios: await nombresServiciosDe(p['Servicios web']),
+    deseoCliente: textoDe(p['Deseo del cliente']),
+    importe: tipo === 'Cliente' ? montoTotal : importeEditor,
+  };
+}
+
+function generarPDFFactura(datos) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50 });
+    const trozos = [];
+    doc.on('data', (trozo) => trozos.push(trozo));
+    doc.on('end', () => resolve(Buffer.concat(trozos)));
+    doc.on('error', reject);
+
+    doc.fontSize(20).text('EDITCHEAP');
+    doc.fontSize(10).text('Edición de vídeo');
+    doc.moveDown(2);
+
+    doc.fontSize(16).text(`Factura FACT-${datos.numeroFactura}`);
+    doc.fontSize(10).text(`Tipo: ${datos.tipo === 'Cliente' ? 'Factura a cliente' : 'Pago a editor'}`);
+    doc.text(`Fecha: ${datos.fecha || '(sin fecha)'}`);
+    doc.text(`Pedido: PED-${datos.numeroPedido}`);
+    doc.moveDown();
+
+    if (datos.tipo === 'Cliente') {
+      doc.fontSize(12).text('Cliente', { underline: true });
+      doc.fontSize(10).text(datos.nombreCliente);
+      if (datos.contactoCliente) doc.text(datos.contactoCliente);
+    } else {
+      doc.fontSize(12).text('Editor', { underline: true });
+      doc.fontSize(10).text(datos.nombreEditor);
+    }
+    doc.moveDown();
+
+    doc.fontSize(12).text('Servicios', { underline: true });
+    doc.fontSize(10).text(datos.servicios);
+    doc.moveDown();
+
+    if (datos.deseoCliente && datos.deseoCliente !== '(sin especificar)') {
+      doc.fontSize(12).text('Detalles del trabajo', { underline: true });
+      doc.fontSize(10).text(datos.deseoCliente);
+      doc.moveDown();
+    }
+
+    doc.fontSize(14).text(`Importe: ${datos.importe} €`, { align: 'right' });
+
+    doc.end();
+  });
+}
+
+async function subirPDFAGoogleDrive(buffer, nombreArchivo) {
+  const credenciales = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
+  const auth = new google.auth.GoogleAuth({
+    credentials: credenciales,
+    scopes: ['https://www.googleapis.com/auth/drive'],
+  });
+  const drive = google.drive({ version: 'v3', auth });
+
+  const respuesta = await drive.files.create({
+    requestBody: {
+      name: nombreArchivo,
+      parents: [GOOGLE_DRIVE_FOLDER_ID],
+    },
+    media: {
+      mimeType: 'application/pdf',
+      body: Readable.from(buffer),
+    },
+    fields: 'id, webViewLink',
+  });
+
+  return respuesta.data.webViewLink || `https://drive.google.com/file/d/${respuesta.data.id}/view`;
+}
+
+async function procesarFacturas() {
+  const facturas = await obtenerFacturasParaPDF();
+  log(`Facturas pendientes de generar PDF: ${facturas.length}`);
+
+  for (const factura of facturas) {
+    const numeroFactura = factura.properties['Nº Factura'].unique_id.number;
+    try {
+      const datos = await construirDatosFactura(factura);
+      const buffer = await generarPDFFactura(datos);
+      const nombreArchivo = `Factura-FACT-${numeroFactura}-${datos.tipo}.pdf`;
+      const enlace = await subirPDFAGoogleDrive(buffer, nombreArchivo);
+      await actualizarNotion(factura.id, { 'Enlace PDF': { url: enlace } });
+      log(`Generado PDF de factura FACT-${numeroFactura} -> ${enlace}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error generando PDF de factura FACT-${numeroFactura}: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
   await procesarCierres();
   await procesarBorrados();
+  await procesarFacturas();
   log('Terminado.');
 }
 
