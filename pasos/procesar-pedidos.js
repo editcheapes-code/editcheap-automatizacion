@@ -16,8 +16,6 @@
 //
 // Ejecutar: node pasos/procesar-pedidos.js
 
-const PDFDocument = require('pdfkit');
-
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_DATA_SOURCE_ID = process.env.NOTION_DATA_SOURCE_ID;
 const NOTION_EDITORES_DATA_SOURCE_ID = '39151046-61ea-80a0-b77d-000b5e2875d8';
@@ -442,66 +440,26 @@ async function construirDatosFactura(factura) {
 
   const montoTotal = p['Monto total (€)'].formula.number || 0;
   const importeEditor = p['Importe Editor (€)'].number || 0;
+  const destinatario =
+    tipo === 'Cliente'
+      ? `Cliente: ${nombreCliente}` + (contactoCliente ? `\nContacto: ${contactoCliente}` : '')
+      : `Editor: ${nombreEditor}`;
 
   return {
     numeroFactura: f['Nº Factura'].unique_id.number,
     tipo,
     fecha: f['Fecha'].date ? f['Fecha'].date.start : null,
     numeroPedido: p['Nº de Pedido'].unique_id.number,
-    nombreCliente,
-    contactoCliente,
-    nombreEditor,
+    destinatario,
     servicios: await nombresServiciosDe(p['Servicios web']),
     deseoCliente: textoDe(p['Deseo del cliente']),
     importe: tipo === 'Cliente' ? montoTotal : importeEditor,
   };
 }
 
-function generarPDFFactura(datos) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50 });
-    const trozos = [];
-    doc.on('data', (trozo) => trozos.push(trozo));
-    doc.on('end', () => resolve(Buffer.concat(trozos)));
-    doc.on('error', reject);
-
-    doc.fontSize(20).text('EDITCHEAP');
-    doc.fontSize(10).text('Edición de vídeo');
-    doc.moveDown(2);
-
-    doc.fontSize(16).text(`Factura FACT-${datos.numeroFactura}`);
-    doc.fontSize(10).text(`Tipo: ${datos.tipo === 'Cliente' ? 'Factura a cliente' : 'Pago a editor'}`);
-    doc.text(`Fecha: ${datos.fecha || '(sin fecha)'}`);
-    doc.text(`Pedido: PED-${datos.numeroPedido}`);
-    doc.moveDown();
-
-    if (datos.tipo === 'Cliente') {
-      doc.fontSize(12).text('Cliente', { underline: true });
-      doc.fontSize(10).text(datos.nombreCliente);
-      if (datos.contactoCliente) doc.text(datos.contactoCliente);
-    } else {
-      doc.fontSize(12).text('Editor', { underline: true });
-      doc.fontSize(10).text(datos.nombreEditor);
-    }
-    doc.moveDown();
-
-    doc.fontSize(12).text('Servicios', { underline: true });
-    doc.fontSize(10).text(datos.servicios);
-    doc.moveDown();
-
-    if (datos.deseoCliente && datos.deseoCliente !== '(sin especificar)') {
-      doc.fontSize(12).text('Detalles del trabajo', { underline: true });
-      doc.fontSize(10).text(datos.deseoCliente);
-      doc.moveDown();
-    }
-
-    doc.fontSize(14).text(`Importe: ${datos.importe} €`, { align: 'right' });
-
-    doc.end();
-  });
-}
-
-async function subirPDFAGoogleDrive(buffer, nombreArchivo) {
+// Genera la factura a partir de la plantilla de Google Docs (Apps Script sustituye los
+// marcadores {{...}} y exporta el resultado como PDF a la carpeta de Drive).
+async function generarFacturaEnDrive(datos, nombreArchivo) {
   const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -509,11 +467,20 @@ async function subirPDFAGoogleDrive(buffer, nombreArchivo) {
       secreto: GOOGLE_APPS_SCRIPT_SECRET,
       carpetaId: GOOGLE_DRIVE_FOLDER_ID,
       nombreArchivo,
-      pdfBase64: buffer.toString('base64'),
+      datos: {
+        NUMERO_FACTURA: `FACT-${datos.numeroFactura}`,
+        TIPO: datos.tipo === 'Cliente' ? 'Factura a cliente' : 'Pago a editor',
+        FECHA: datos.fecha || '(sin fecha)',
+        NUMERO_PEDIDO: `PED-${datos.numeroPedido}`,
+        DESTINATARIO: datos.destinatario,
+        SERVICIOS: datos.servicios,
+        DETALLES: datos.deseoCliente && datos.deseoCliente !== '(sin especificar)' ? datos.deseoCliente : '',
+        IMPORTE: `${datos.importe} €`,
+      },
     }),
   });
   const data = await response.json();
-  if (!response.ok || data.error) throw new Error('Error subiendo PDF a Drive: ' + JSON.stringify(data));
+  if (!response.ok || data.error) throw new Error('Error generando factura en Drive: ' + JSON.stringify(data));
   return data.url;
 }
 
@@ -525,9 +492,8 @@ async function procesarFacturas() {
     const numeroFactura = factura.properties['Nº Factura'].unique_id.number;
     try {
       const datos = await construirDatosFactura(factura);
-      const buffer = await generarPDFFactura(datos);
       const nombreArchivo = `Factura-FACT-${numeroFactura}-${datos.tipo}.pdf`;
-      const enlace = await subirPDFAGoogleDrive(buffer, nombreArchivo);
+      const enlace = await generarFacturaEnDrive(datos, nombreArchivo);
       await actualizarNotion(factura.id, { 'Enlace PDF': { url: enlace } });
       log(`Generado PDF de factura FACT-${numeroFactura} -> ${enlace}`);
       await esperar(1000);

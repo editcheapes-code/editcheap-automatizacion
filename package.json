@@ -1,9 +1,0 @@
-{
-  "name": "editcheap-automatizacion",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Automatización EDITCHEAP: Notion, Discord y facturas en PDF a Google Drive.",
-  "dependencies": {
-    "pdfkit": "^0.15.1"
-  }
-}
