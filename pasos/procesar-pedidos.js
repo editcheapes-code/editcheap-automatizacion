@@ -482,7 +482,7 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
   });
   const data = await response.json();
   if (!response.ok || data.error) throw new Error('Error generando factura en Drive: ' + JSON.stringify(data));
-  return data.url;
+  return { url: data.url, editUrl: data.editUrl };
 }
 
 async function procesarFacturas() {
@@ -494,8 +494,8 @@ async function procesarFacturas() {
     try {
       const datos = await construirDatosFactura(factura);
       const nombreArchivo = `Factura-FACT-${numeroFactura}-${datos.tipo}.pdf`;
-      const enlace = await generarFacturaEnDrive(datos, nombreArchivo);
-      await actualizarNotion(factura.id, { 'Enlace PDF': { url: enlace } });
+      const { url: enlace, editUrl } = await generarFacturaEnDrive(datos, nombreArchivo);
+      await actualizarNotion(factura.id, { 'Enlace PDF': { url: enlace }, 'Editar factura': { url: editUrl } });
       log(`Generado PDF de factura FACT-${numeroFactura} -> ${enlace}`);
       await esperar(1000);
     } catch (err) {
