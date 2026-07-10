@@ -445,6 +445,12 @@ async function construirDatosFactura(factura) {
       ? `Cliente: ${nombreCliente}` + (contactoCliente ? `\nContacto: ${contactoCliente}` : '')
       : `Editor: ${nombreEditor}`;
 
+  const ajusteManual = p['Ajuste manual (€)'].number || 0;
+  const ajuste =
+    ajusteManual !== 0
+      ? `Ajuste: ${ajusteManual > 0 ? '+' : ''}${ajusteManual} € — ${textoDe(p['Concepto del ajuste'])}`
+      : '';
+
   return {
     numeroFactura: f['Nº Factura'].unique_id.number,
     tipo,
@@ -454,6 +460,7 @@ async function construirDatosFactura(factura) {
     servicios: await nombresServiciosDe(p['Servicios web']),
     deseoCliente: textoDe(p['Deseo del cliente']),
     importe: tipo === 'Cliente' ? montoTotal : importeEditor,
+    ajuste,
   };
 }
 
@@ -477,6 +484,7 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
         SERVICIOS: datos.servicios,
         DETALLES: datos.deseoCliente && datos.deseoCliente !== '(sin especificar)' ? datos.deseoCliente : '',
         IMPORTE: `${datos.importe} €`,
+        AJUSTE: datos.ajuste || '',
       },
     }),
   });
