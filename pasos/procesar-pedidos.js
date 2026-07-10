@@ -424,26 +424,29 @@ async function construirDatosFactura(factura) {
 
   let nombreCliente = '(sin cliente asignado)';
   let contactoCliente = '';
+  let dniCliente = '';
   const clienteId = primerIdRelacion(p['Cliente']);
   if (clienteId) {
     const cliente = await obtenerPaginaNotion(clienteId);
     nombreCliente = tituloDePagina(cliente, 'Nombre del Cliente');
     contactoCliente = textoDe(cliente.properties['Contacto / Red']);
+    dniCliente = textoDe(cliente.properties['DNI/CIF']);
   }
 
   let nombreEditor = '(sin editor asignado)';
+  let dniEditor = '';
   const editorId = primerIdRelacion(p['Editor principal']);
   if (editorId) {
     const editor = await obtenerPaginaNotion(editorId);
     nombreEditor = tituloDePagina(editor, 'Nombre');
+    dniEditor = textoDe(editor.properties['DNI/NIE']);
   }
 
   const montoTotal = p['Monto total (€)'].formula.number || 0;
   const importeEditor = p['Importe Editor (€)'].number || 0;
-  const destinatario =
-    tipo === 'Cliente'
-      ? `Cliente: ${nombreCliente}` + (contactoCliente ? `\nContacto: ${contactoCliente}` : '')
-      : `Editor: ${nombreEditor}`;
+  const nombrePrincipal = tipo === 'Cliente' ? nombreCliente : nombreEditor;
+  const dni = tipo === 'Cliente' ? dniCliente : dniEditor;
+  const destinatario = tipo === 'Cliente' && contactoCliente ? `Contacto: ${contactoCliente}` : '';
 
   const ajusteManual = p['Ajuste manual (€)'].number || 0;
   const ajuste =
@@ -456,7 +459,9 @@ async function construirDatosFactura(factura) {
     tipo,
     fecha: f['Fecha'].date ? f['Fecha'].date.start : null,
     numeroPedido: p['Nº de Pedido'].unique_id.number,
+    nombrePrincipal,
     destinatario,
+    dni,
     servicios: await nombresServiciosDe(p['Servicios web']),
     deseoCliente: textoDe(p['Deseo del cliente']),
     importe: tipo === 'Cliente' ? montoTotal : importeEditor,
@@ -477,7 +482,11 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
       tipoFactura: datos.tipo,
       datos: {
         NUMERO_FACTURA: `FACT-${datos.numeroFactura}`,
-        TIPO: datos.tipo === 'Cliente' ? 'Factura a cliente' : 'Pago a editor',
+        TIPO: datos.nombrePrincipal,
+        DNI:
+          datos.dni && datos.dni !== '(sin especificar)'
+            ? `${datos.tipo === 'Cliente' ? 'DNI/CIF' : 'DNI/NIE'}: ${datos.dni}`
+            : '',
         FECHA: datos.fecha || '(sin fecha)',
         NUMERO_PEDIDO: `PED-${datos.numeroPedido}`,
         DESTINATARIO: datos.destinatario,
