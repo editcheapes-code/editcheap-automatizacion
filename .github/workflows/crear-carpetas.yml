@@ -1,0 +1,28 @@
+name: Crear carpetas (DIGI storage vía WebDAV)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  crear-carpetas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: node pasos/crear-carpetas-cloud.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DIGISTORAGE_USER: ${{ secrets.DIGISTORAGE_USER }}
+          DIGISTORAGE_WEBDAV_PASSWORD: ${{ secrets.DIGISTORAGE_WEBDAV_PASSWORD }}
+      - name: Avisar por Discord si la ejecución falla
+        if: failure()
+        run: |
+          curl -s -X POST "https://discord.com/api/v10/channels/${{ secrets.DISCORD_ALERT_CHANNEL_ID }}/messages" \
+            -H "Authorization: Bot ${{ secrets.DISCORD_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"⚠️ La automatización de carpetas (DIGI storage) ha fallado. Revisa el detalle aquí: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

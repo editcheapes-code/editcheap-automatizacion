@@ -1,0 +1,8 @@
+{
+  "name": "editcheap-automatizacion",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "webdav": "^5.10.0"
+  }
+}
