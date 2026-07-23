@@ -9,7 +9,9 @@
 //   4. Borrar el mensaje de Discord (y las respuestas que le hicieron, para no dejar restos
 //      sueltos) cuando el pedido está "7. Finalizado y Entregado" y todavía no se borró
 //      ("Discord eliminado" = false).
-//   5. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
+//   5. Calcular el 5% de comisión ("Importe Supervisor (€)") de los pedidos que ya tienen
+//      "Supervisor asignado" y todavía no tienen ese importe calculado.
+//   6. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
 //      a la carpeta de Google Drive compartida con la cuenta de servicio.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
@@ -375,7 +377,41 @@ async function procesarBorrados() {
   }
 }
 
-// ---------- FASE 5: generar PDF de facturas y subirlo a Google Drive ----------
+// ---------- FASE 5: calcular el 5% de comisión del supervisor asignado ----------
+
+async function obtenerPedidosParaComisionSupervisor() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Supervisor asignado', relation: { is_not_empty: true } },
+      { property: 'Importe Supervisor (€)', number: { is_empty: true } },
+    ],
+  });
+  return resultados.map((pedido) => {
+    const p = pedido.properties;
+    return {
+      pageId: pedido.id,
+      numeroPedido: p['Nº de Pedido'].unique_id.number,
+      montoTotal: p['Monto total (€)'].formula.number || 0,
+    };
+  });
+}
+
+async function procesarComisionSupervisor() {
+  const pedidos = await obtenerPedidosParaComisionSupervisor();
+  log(`Pedidos con supervisor pendientes de calcular comisión: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      const importeSupervisor = Math.round(pedido.montoTotal * 0.05 * 100) / 100;
+      await actualizarNotion(pedido.pageId, { 'Importe Supervisor (€)': { number: importeSupervisor } });
+      log(`PED-${pedido.numeroPedido}: comisión de supervisor calculada -> ${importeSupervisor} €`);
+    } catch (err) {
+      log(`Error calculando comisión de supervisor de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+// ---------- FASE 6: generar PDF de facturas y subirlo a Google Drive ----------
 
 function primerIdRelacion(propiedad) {
   if (!propiedad || !propiedad.relation || propiedad.relation.length === 0) return null;
@@ -526,6 +562,7 @@ async function main() {
   await procesarAsignaciones();
   await procesarCierres();
   await procesarBorrados();
+  await procesarComisionSupervisor();
   await procesarFacturas();
   log('Terminado.');
 }
