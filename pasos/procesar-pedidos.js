@@ -11,7 +11,9 @@
 //      ("Discord eliminado" = false).
 //   5. Calcular el 5% de comisión ("Importe Supervisor (€)") de los pedidos que ya tienen
 //      "Supervisor asignado" y todavía no tienen ese importe calculado.
-//   6. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
+//   6. Actualizar la cuadrícula de últimos 8 vídeos de YouTube en Escritorio EDITCHEAP y
+//      Supervisores, para que siempre muestre lo último subido al canal.
+//   7. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
 //      a la carpeta de Google Drive compartida con la cuenta de servicio.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
@@ -27,6 +29,9 @@ const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL;
 const GOOGLE_APPS_SCRIPT_SECRET = process.env.GOOGLE_APPS_SCRIPT_SECRET;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const YOUTUBE_UPLOADS_PLAYLIST_ID = 'UUH2mq9Bi754AFlKygVrO9Ow';
+const NOTION_PAGINAS_CON_CUADRICULA_YOUTUBE = ['39a5104661ea81e8a934e6438c60410a', '3a551046-61ea-810c-89c0-e0912bcd4e06'];
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -411,7 +416,119 @@ async function procesarComisionSupervisor() {
   }
 }
 
-// ---------- FASE 6: generar PDF de facturas y subirlo a Google Drive ----------
+// ---------- FASE 6: mantener al día la cuadrícula de últimos vídeos de YouTube ----------
+//
+// La cuadrícula es una lista de 4 columnas x 2 vídeos en Notion (Escritorio EDITCHEAP y
+// Supervisores). Cada vídeo es un bloque "embed" fijo — esta fase busca esos 8 bloques y
+// reescribe su URL con los últimos 8 vídeos subidos al canal, para que se vea siempre al día
+// sin depender de ningún widget externo (Elfsight se quedó una vez con datos de hace 3 meses).
+
+async function obtenerHijosBloqueNotion(blockId) {
+  const url = `https://api.notion.com/v1/blocks/${blockId}/children?page_size=100`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': '2025-09-03' },
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error leyendo bloques de Notion: ' + JSON.stringify(data));
+  return data.results;
+}
+
+async function actualizarBloqueEmbedNotion(blockId, urlNueva) {
+  const url = `https://api.notion.com/v1/blocks/${blockId}`;
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ embed: { url: urlNueva } }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error actualizando bloque embed: ' + JSON.stringify(data));
+}
+
+function textoDeBloque(bloque) {
+  const richText = bloque[bloque.type] && bloque[bloque.type].rich_text;
+  return richText ? richText.map((t) => t.plain_text).join('') : '';
+}
+
+// Busca recursivamente, entre los descendientes de un bloque, la lista de columnas que viene
+// justo después del texto indicado (ej. el encabezado "Ultimas publicaciones Youtube").
+async function buscarListaColumnasTrasTexto(blockId, textoBuscado) {
+  const hijos = await obtenerHijosBloqueNotion(blockId);
+  for (let i = 0; i < hijos.length; i++) {
+    if (textoDeBloque(hijos[i]).includes(textoBuscado) && hijos[i + 1] && hijos[i + 1].type === 'column_list') {
+      return hijos[i + 1].id;
+    }
+  }
+  for (const bloque of hijos) {
+    if (bloque.type === 'column_list' || bloque.type === 'column') {
+      const encontrado = await buscarListaColumnasTrasTexto(bloque.id, textoBuscado);
+      if (encontrado) return encontrado;
+    } else if (bloque.has_children) {
+      const encontrado = await buscarListaColumnasTrasTexto(bloque.id, textoBuscado);
+      if (encontrado) return encontrado;
+    }
+  }
+  return null;
+}
+
+async function obtenerColumnasDeVideos(pageId) {
+  const listaColumnasId = await buscarListaColumnasTrasTexto(pageId, 'Ultimas publicaciones Youtube');
+  if (!listaColumnasId) throw new Error('no se encontró la cuadrícula de vídeos de YouTube en la página');
+  const columnas = await obtenerHijosBloqueNotion(listaColumnasId);
+  const resultado = [];
+  for (const columna of columnas) {
+    const hijos = await obtenerHijosBloqueNotion(columna.id);
+    resultado.push(hijos.filter((b) => b.type === 'embed'));
+  }
+  return resultado;
+}
+
+async function obtenerUltimosVideoIds(cantidad) {
+  const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${YOUTUBE_UPLOADS_PLAYLIST_ID}&maxResults=${cantidad}&key=${YOUTUBE_API_KEY}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error consultando la API de YouTube: ' + JSON.stringify(data));
+  return data.items.map((item) => item.snippet.resourceId.videoId);
+}
+
+async function procesarCuadriculaYoutube() {
+  if (!YOUTUBE_API_KEY) {
+    log('YOUTUBE_API_KEY no configurada, se omite la actualización de la cuadrícula de YouTube.');
+    return;
+  }
+  try {
+    const videoIds = await obtenerUltimosVideoIds(8);
+    if (videoIds.length < 8) {
+      log(`La API de YouTube solo devolvió ${videoIds.length} vídeos, se omite esta vez.`);
+      return;
+    }
+    for (const pageId of NOTION_PAGINAS_CON_CUADRICULA_YOUTUBE) {
+      const columnas = await obtenerColumnasDeVideos(pageId);
+      let actualizados = 0;
+      for (let i = 0; i < columnas.length; i++) {
+        const [arriba, abajo] = columnas[i];
+        const urlArriba = `https://www.youtube.com/watch?v=${videoIds[i]}`;
+        const urlAbajo = `https://www.youtube.com/watch?v=${videoIds[i + 4]}`;
+        if (arriba && arriba.embed.url !== urlArriba) {
+          await actualizarBloqueEmbedNotion(arriba.id, urlArriba);
+          actualizados++;
+        }
+        if (abajo && abajo.embed.url !== urlAbajo) {
+          await actualizarBloqueEmbedNotion(abajo.id, urlAbajo);
+          actualizados++;
+        }
+      }
+      log(`Cuadrícula de YouTube en página ${pageId}: ${actualizados} recuadro(s) actualizado(s)`);
+    }
+  } catch (err) {
+    log(`Error actualizando cuadrícula de YouTube: ${err.message}`);
+  }
+}
+
+// ---------- FASE 7: generar PDF de facturas y subirlo a Google Drive ----------
 
 function primerIdRelacion(propiedad) {
   if (!propiedad || !propiedad.relation || propiedad.relation.length === 0) return null;
@@ -563,6 +680,7 @@ async function main() {
   await procesarCierres();
   await procesarBorrados();
   await procesarComisionSupervisor();
+  await procesarCuadriculaYoutube();
   await procesarFacturas();
   log('Terminado.');
 }
