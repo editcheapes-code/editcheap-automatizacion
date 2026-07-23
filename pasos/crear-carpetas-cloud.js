@@ -23,7 +23,11 @@ const EDITORES_DATA_SOURCE_ID = '39151046-61ea-80a0-b77d-000b5e2875d8';
 // Ruta dentro de DIGI storage, la misma que usa la unidad de red Z: en el PC de sobremesa,
 // pero en formato de ruta WebDAV (barras normales, sin letra de unidad).
 const RAIZ = '/Sincronizado con PC/ARCHIVO_COMPARTIDO';
-const CARPETA_PROYECTOS = `${RAIZ}/Proyectos_Compartidos`;
+// Los clientes viven en COLABORACIONES, cada uno en su propia carpeta "CLI-<número>-<nombre>"
+// (el número es el de "Nº de Cliente" en Notion), con todo lo que necesita un editor para
+// trabajar. Los acuerdos firmados se guardan aparte, en Documentos_Clientes, para que un
+// editor con acceso a COLABORACIONES no vea información sensible del cliente.
+const CARPETA_COLABORACIONES = `${RAIZ}/COLABORACIONES`;
 const CARPETA_DOCS_CLIENTES = `${RAIZ}/Documentos_Clientes`;
 const CARPETA_DOCS_EDITORES = `${RAIZ}/Documentos_Editores`;
 
@@ -35,6 +39,11 @@ function log(msg) {
 // WebDAV, para que el resultado se vea bien también desde un PC con la unidad Z: montada).
 function nombreSeguro(nombre) {
   return nombre.replace(/[<>:"/\\|?*]/g, '').trim();
+}
+
+function textoDe(propiedad) {
+  if (!propiedad || !propiedad.rich_text || propiedad.rich_text.length === 0) return '';
+  return propiedad.rich_text.map((t) => t.plain_text).join('');
 }
 
 let webdavClient;
@@ -107,8 +116,8 @@ Reglas:
 - Las cachés de Premiere/AfterEffects/Filmora se quedan en el PC local, nunca aquí dentro.
 `;
 
-async function crearCarpetaProyecto(nombre) {
-  const base = `${CARPETA_PROYECTOS}/${nombre}`;
+async function crearCarpetaProyecto(nombreCarpeta, nombre) {
+  const base = `${CARPETA_COLABORACIONES}/${nombreCarpeta}`;
   for (const sub of ['01_Material_Recibido', '02_Proyecto_Edicion', '03_Recursos_Grafico', '04_Entregas']) {
     await crearCarpetaSiNoExiste(`${base}/${sub}`);
   }
@@ -134,6 +143,7 @@ async function obtenerClientesParaCrear() {
   return resultados.map((p) => ({
     pageId: p.id,
     nombre: p.properties['Nombre del Cliente'].title.map((t) => t.plain_text).join(''),
+    numeroCliente: p.properties['Nº de Cliente'].unique_id.number,
   }));
 }
 
@@ -148,10 +158,11 @@ async function procesarCreacionClientes() {
         log(`Cliente ${cliente.pageId}: nombre vacío tras limpiar, se ignora`);
         continue;
       }
-      const carpetaProyecto = await crearCarpetaProyecto(nombre);
-      await crearCarpetaDocumentacion(CARPETA_DOCS_CLIENTES, nombre);
+      const nombreCarpeta = `CLI-${cliente.numeroCliente}-${nombre}`;
+      const carpetaProyecto = await crearCarpetaProyecto(nombreCarpeta, nombre);
+      await crearCarpetaDocumentacion(CARPETA_DOCS_CLIENTES, nombreCarpeta);
       await actualizarNotion(cliente.pageId, {
-        'Carpeta local': { rich_text: [{ text: { content: `Z:\\DIGIstorage\\Sincronizado con PC\\ARCHIVO_COMPARTIDO\\Proyectos_Compartidos\\${nombre}` } }] },
+        'Carpeta local': { rich_text: [{ text: { content: `Z:\\DIGIstorage\\Sincronizado con PC\\ARCHIVO_COMPARTIDO\\COLABORACIONES\\${nombreCarpeta}` } }] },
       });
       log(`Cliente "${nombre}": carpetas creadas -> ${carpetaProyecto}`);
     } catch (err) {
@@ -207,11 +218,18 @@ async function obtenerPendientesDeDescarga(dataSourceId, propNombre) {
     ],
   });
   return resultados
-    .map((p) => ({
-      pageId: p.id,
-      nombre: p.properties[propNombre].title.map((t) => t.plain_text).join(''),
-      archivos: p.properties['Acuerdo de colaboración firmado'].files || [],
-    }))
+    .map((p) => {
+      // El nombre real de la carpeta (ej. "CLI-11-Banshee Battles" para clientes, o solo el
+      // nombre para editores) es el último tramo de "Carpeta local", ya calculado al crearla.
+      const carpetaLocal = textoDe(p.properties['Carpeta local']);
+      const nombreCarpeta = carpetaLocal.split('\\').pop();
+      return {
+        pageId: p.id,
+        nombre: p.properties[propNombre].title.map((t) => t.plain_text).join(''),
+        nombreCarpeta,
+        archivos: p.properties['Acuerdo de colaboración firmado'].files || [],
+      };
+    })
     .filter((p) => p.archivos.length > 0);
 }
 
@@ -234,7 +252,7 @@ async function procesarDescargasFirmados(dataSourceId, propNombre, carpetaDocsRa
         continue;
       }
       const nombreArchivo = archivo.name || 'contrato_firmado.pdf';
-      const nombreCarpeta = nombreSeguro(item.nombre);
+      const nombreCarpeta = item.nombreCarpeta;
       const rutaDestino = `${carpetaDocsRaiz}/${nombreCarpeta}/Contrato_Firmado/${nombreArchivo}`;
 
       const buffer = await descargarArchivo(url);
