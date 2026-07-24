@@ -15,6 +15,8 @@
 //      Supervisores, para que siempre muestre lo último subido al canal.
 //   7. Generar el PDF de las facturas marcadas con "Generar PDF" y sin "Enlace PDF", y subirlo
 //      a la carpeta de Google Drive compartida con la cuenta de servicio.
+//   8. Generar el PDF del Acuerdo de Colaboración de Clientes y Editores marcados con
+//      "Generar Acuerdo" y sin "Enlace Acuerdo" (mismo mecanismo que las facturas).
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -674,6 +676,130 @@ async function procesarFacturas() {
   }
 }
 
+// ---------- FASE 8: generar Acuerdos de Colaboración (Clientes y Editores) ----------
+//
+// Igual que las facturas: al marcar "Generar Acuerdo" en un Cliente o Editor, se genera un PDF
+// a partir de la plantilla correspondiente y se guarda el enlace en "Enlace Acuerdo". Usa el
+// mismo Apps Script que las facturas, pero con tipoDocumento: 'Acuerdo' para que use las
+// plantillas y carpetas de Drive de Acuerdos en vez de las de Facturas.
+
+const NOTION_CLIENTES_DATA_SOURCE_ID = '39151046-61ea-805f-829a-000b0eb6cf52';
+
+function fechaDeHoyLarga() {
+  return new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+async function obtenerClientesParaAcuerdo() {
+  return consultarDataSource(NOTION_CLIENTES_DATA_SOURCE_ID, {
+    and: [
+      { property: 'Generar Acuerdo', checkbox: { equals: true } },
+      { property: 'Enlace Acuerdo', url: { is_empty: true } },
+    ],
+  });
+}
+
+async function obtenerEditoresParaAcuerdo() {
+  return consultarDataSource(NOTION_EDITORES_DATA_SOURCE_ID, {
+    and: [
+      { property: 'Generar Acuerdo', checkbox: { equals: true } },
+      { property: 'Enlace Acuerdo', url: { is_empty: true } },
+    ],
+  });
+}
+
+async function consultarDataSource(dataSourceId, filter) {
+  const url = `https://api.notion.com/v1/data_sources/${dataSourceId}/query`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ filter }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error consultando Notion: ' + JSON.stringify(data));
+  return data.results;
+}
+
+async function generarAcuerdoEnDrive(tipoFactura, datos, nombreArchivo) {
+  const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      secreto: GOOGLE_APPS_SCRIPT_SECRET,
+      carpetaId: GOOGLE_DRIVE_FOLDER_ID,
+      nombreArchivo,
+      tipoDocumento: 'Acuerdo',
+      tipoFactura,
+      datos,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error('Error generando Acuerdo en Drive: ' + JSON.stringify(data));
+  return { url: data.url, editUrl: data.editUrl };
+}
+
+async function procesarAcuerdosClientes() {
+  const clientes = await obtenerClientesParaAcuerdo();
+  log(`Clientes pendientes de generar Acuerdo: ${clientes.length}`);
+
+  for (const cliente of clientes) {
+    const nombre = tituloDePagina(cliente, 'Nombre del Cliente');
+    try {
+      const c = cliente.properties;
+      const dni = textoDe(c['DNI/CIF']);
+      let numeroPedido = '(sin especificar)';
+      const pedidoId = primerIdRelacion(c['📥 Pedidos']);
+      if (pedidoId) {
+        const pedido = await obtenerPaginaNotion(pedidoId);
+        numeroPedido = `PED-${pedido.properties['Nº de Pedido'].unique_id.number}`;
+      }
+
+      const datos = {
+        FECHA: fechaDeHoyLarga(),
+        NUMERO_PEDIDO: numeroPedido,
+        NOMBRE: nombre,
+        DNI: dni !== '(sin especificar)' ? dni : '',
+      };
+      const nombreArchivo = `Acuerdo-Colaboracion-Cliente-${nombre}.pdf`;
+      const { url: enlace } = await generarAcuerdoEnDrive('Cliente', datos, nombreArchivo);
+      await actualizarNotion(cliente.id, { 'Enlace Acuerdo': { url: enlace } });
+      log(`Generado Acuerdo de Colaboración del cliente ${nombre} -> ${enlace}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error generando Acuerdo de Colaboración del cliente ${nombre}: ${err.message}`);
+    }
+  }
+}
+
+async function procesarAcuerdosEditores() {
+  const editores = await obtenerEditoresParaAcuerdo();
+  log(`Editores pendientes de generar Acuerdo: ${editores.length}`);
+
+  for (const editor of editores) {
+    const nombre = tituloDePagina(editor, 'Nombre');
+    try {
+      const e = editor.properties;
+      const dni = textoDe(e['DNI/NIE']);
+
+      const datos = {
+        FECHA: fechaDeHoyLarga(),
+        NOMBRE: nombre,
+        DNI: dni !== '(sin especificar)' ? dni : '',
+      };
+      const nombreArchivo = `Acuerdo-Colaboracion-Editor-${nombre}.pdf`;
+      const { url: enlace } = await generarAcuerdoEnDrive('Editor', datos, nombreArchivo);
+      await actualizarNotion(editor.id, { 'Enlace Acuerdo': { url: enlace } });
+      log(`Generado Acuerdo de Colaboración del editor ${nombre} -> ${enlace}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error generando Acuerdo de Colaboración del editor ${nombre}: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
@@ -682,6 +808,8 @@ async function main() {
   await procesarComisionSupervisor();
   await procesarCuadriculaYoutube();
   await procesarFacturas();
+  await procesarAcuerdosClientes();
+  await procesarAcuerdosEditores();
   log('Terminado.');
 }
 
