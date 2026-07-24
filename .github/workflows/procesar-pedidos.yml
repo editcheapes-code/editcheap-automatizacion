@@ -23,6 +23,12 @@ jobs:
           GOOGLE_APPS_SCRIPT_URL: ${{ secrets.GOOGLE_APPS_SCRIPT_URL }}
           GOOGLE_APPS_SCRIPT_SECRET: ${{ secrets.GOOGLE_APPS_SCRIPT_SECRET }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      - run: npm install
+      - run: node pasos/crear-carpetas-cloud.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DIGISTORAGE_USER: ${{ secrets.DIGISTORAGE_USER }}
+          DIGISTORAGE_WEBDAV_PASSWORD: ${{ secrets.DIGISTORAGE_WEBDAV_PASSWORD }}
       - name: Avisar por Discord si la ejecución falla
         if: failure()
         run: |

@@ -127,7 +127,7 @@ async function crearCarpetaProyecto(nombreCarpeta, nombre) {
 
 async function crearCarpetaDocumentacion(carpetaRaiz, nombre) {
   const base = `${carpetaRaiz}/${nombre}`;
-  await crearCarpetaSiNoExiste(`${base}/Contrato_Firmado`);
+  await crearCarpetaSiNoExiste(`${base}/Acuerdo_Firmado`);
   return base;
 }
 
@@ -251,12 +251,12 @@ async function procesarDescargasFirmados(dataSourceId, propNombre, carpetaDocsRa
         log(`${etiqueta} "${item.nombre}": el archivo no tiene una URL descargable válida, se ignora`);
         continue;
       }
-      const nombreArchivo = archivo.name || 'contrato_firmado.pdf';
+      const nombreArchivo = archivo.name || 'acuerdo_firmado.pdf';
       const nombreCarpeta = item.nombreCarpeta;
-      const rutaDestino = `${carpetaDocsRaiz}/${nombreCarpeta}/Contrato_Firmado/${nombreArchivo}`;
+      const rutaDestino = `${carpetaDocsRaiz}/${nombreCarpeta}/Acuerdo_Firmado/${nombreArchivo}`;
 
       const buffer = await descargarArchivo(url);
-      await crearCarpetaSiNoExiste(`${carpetaDocsRaiz}/${nombreCarpeta}/Contrato_Firmado`);
+      await crearCarpetaSiNoExiste(`${carpetaDocsRaiz}/${nombreCarpeta}/Acuerdo_Firmado`);
       await escribirArchivo(rutaDestino, buffer);
       await actualizarNotion(item.pageId, { 'Doc firmado descargado': { checkbox: true } });
       log(`${etiqueta} "${item.nombre}": documento firmado descargado -> ${rutaDestino}`);

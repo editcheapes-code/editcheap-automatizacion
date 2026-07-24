@@ -1,8 +1,10 @@
 name: Crear carpetas (DIGI storage vía WebDAV)
 
+# El cron nativo de GitHub ('*/5 * * * *') no es fiable en repos poco activos (se han visto
+# huecos de varias horas entre ejecuciones). Por eso esta tarea ahora corre también como parte
+# de "Procesar pedidos Notion -> Discord" (procesar-pedidos.yml), que sí se dispara cada 5 min
+# de verdad vía cron-job.org. Este workflow se deja solo para lanzarlo a mano si hace falta.
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 jobs:
