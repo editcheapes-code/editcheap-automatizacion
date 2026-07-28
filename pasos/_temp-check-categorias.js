@@ -8,17 +8,11 @@ const headers = {
 async function main() {
   const res = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/channels`, { headers });
   const canales = await res.json();
+  console.log('res.ok:', res.ok, '| es array:', Array.isArray(canales), '| total canales:', canales.length);
 
-  const categorias = canales.filter((c) => c.type === 4);
-  console.log('=== Categorías ===');
-  for (const c of categorias) {
-    console.log(`${c.id} | pos=${c.position} | "${c.name}"`);
-  }
-
-  console.log('\n=== Salas de voz que contienen "Sala de Reuniones" ===');
-  const salas = canales.filter((c) => c.type === 2 && c.name.includes('Sala de Reuniones'));
-  for (const s of salas.sort((a, b) => a.position - b.position)) {
-    console.log(`${s.id} | parent=${s.parent_id} | pos=${s.position} | "${s.name}"`);
+  console.log('\n=== TODO (sin filtrar), ordenado por posición ===');
+  for (const c of [...canales].sort((a, b) => (a.position || 0) - (b.position || 0))) {
+    console.log(`id=${c.id} | type=${c.type} | parent=${c.parent_id || '-'} | pos=${c.position} | "${c.name}"`);
   }
 }
 
