@@ -32,10 +32,10 @@ const PERM = {
   SEND_MESSAGES_IN_THREADS: 274877906944,
 };
 function sum(...vals) {
-  return vals.reduce((a, b) => a + b, 0n);
+  return vals.reduce((a, b) => a + b, 0);
 }
 function n(v) {
-  return typeof v === 'bigint' ? v.toString() : String(v);
+  return String(v);
 }
 
 const headers = {
