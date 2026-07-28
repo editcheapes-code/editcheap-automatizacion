@@ -234,13 +234,17 @@ function construirMensajeOferta(pedido, importeEditor) {
   );
 }
 
-function construirMensajeBienvenidaSala(discordId, numeroPedido) {
+function construirMensajeBienvenidaSala(discordId, numeroPedido, enlaceSubida, enlaceDescarga) {
+  const lineaSubida = enlaceSubida ? `📤 Sube aquí tu material para el editor: ${enlaceSubida}\n` : '';
+  const lineaDescarga = enlaceDescarga ? `📥 Aquí podrás descargar tus entregas finales: ${enlaceDescarga}\n` : '';
   return (
     `${SEPARADOR}\n` +
     `<@${discordId}>\n\n` +
     '🎥 ¡BIENVENIDO/A A TU SALA DE REUNIONES! 🎥\n\n' +
     `📌 Pedido: PED-${numeroPedido}\n\n` +
     'Esta sala es privada: solo tú y el equipo de EDITCHEAP asignado a tu proyecto podéis entrar y veros aquí.\n\n' +
+    `${lineaSubida}${lineaDescarga}` +
+    (lineaSubida || lineaDescarga ? '\n' : '') +
     '🎙️ Cuando quieras hacer una videollamada con tu editor, entra aquí por voz cuando os venga bien a los dos.\n' +
     '💬 Si tienes cualquier duda mientras tanto, escribe en el canal de #tickets-soporte.\n\n' +
     '¡Bienvenido/a y gracias por confiar en EDITCHEAP! 👋\n' +
@@ -947,9 +951,15 @@ async function procesarAsignacionSalas() {
         log(`PED-${pedido.numeroPedido}: no hay ninguna sala de reunión libre ahora mismo`);
         continue;
       }
+      const enlaceSubida = cliente.properties['Enlace para Subir Material'].url;
+      const enlaceDescarga = cliente.properties['Enlace para Descargar Entregas'].url;
+
       await concederAccesoSala(sala.id, discordId);
       await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] } });
-      await enviarMensajeDiscordEnCanal(sala.id, construirMensajeBienvenidaSala(discordId, pedido.numeroPedido));
+      await enviarMensajeDiscordEnCanal(
+        sala.id,
+        construirMensajeBienvenidaSala(discordId, pedido.numeroPedido, enlaceSubida, enlaceDescarga)
+      );
       log(`PED-${pedido.numeroPedido}: asignada ${sala.nombre} al cliente "${tagCliente}", mensaje de bienvenida enviado`);
       await esperar(1000);
     } catch (err) {
