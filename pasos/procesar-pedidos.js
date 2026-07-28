@@ -20,7 +20,8 @@
 //   9. Asignar una Sala de Reunión de Discord a cada pedido con cliente, dar acceso al
 //      editor cuando se le asigna, y liberar la sala cuando el pedido se finaliza. En cuanto
 //      Jorge rellena los enlaces de subida/descarga de material del cliente en Notion, se
-//      manda un mensaje con ellos a la sala (una sola vez).
+//      manda un mensaje con ellos a la sala (una sola vez). Cuando el PDF de una factura de
+//      Cliente ya está generado, se avisa también en la sala de su pedido con el enlace.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -1127,6 +1128,56 @@ async function procesarNotificacionEnlacesMaterial() {
   }
 }
 
+function construirMensajeJustificantePago(numeroFactura, enlacePDF) {
+  return (
+    `${SEPARADOR}\n` +
+    '🧾 TU JUSTIFICANTE DE PAGO YA ESTÁ LISTO 🧾\n\n' +
+    `Factura FACT-${numeroFactura}: ${enlacePDF}\n\n` +
+    'Guárdalo para tus registros. Si tienes cualquier duda, escribe en el canal de #tickets-soporte.\n' +
+    `${SEPARADOR}`
+  );
+}
+
+async function obtenerFacturasParaNotificarSala() {
+  return consultarFacturas({
+    and: [
+      { property: 'Tipo', select: { equals: 'Cliente' } },
+      { property: 'Enlace PDF', url: { is_not_empty: true } },
+      { property: 'Enviado a Sala', checkbox: { equals: false } },
+    ],
+  });
+}
+
+async function procesarNotificacionFacturaSala() {
+  const facturas = await obtenerFacturasParaNotificarSala();
+  log(`Facturas de cliente pendientes de avisar en su sala: ${facturas.length}`);
+
+  for (const factura of facturas) {
+    const numeroFactura = factura.properties['Nº Factura'].unique_id.number;
+    try {
+      const pedidoId = primerIdRelacion(factura.properties['Pedido']);
+      if (!pedidoId) {
+        log(`FACT-${numeroFactura}: no tiene pedido enlazado, se omite`);
+        continue;
+      }
+      const pedido = await obtenerPaginaNotion(pedidoId);
+      const salaNombre = textoDe(pedido.properties['Sala de Reunión']);
+      if (salaNombre === '(sin especificar)') continue; // el pedido aún no tiene sala, se reintenta luego
+
+      const sala = SALAS_REUNION.find((s) => s.nombre === salaNombre);
+      if (!sala) continue;
+
+      const enlacePDF = factura.properties['Enlace PDF'].url;
+      await enviarMensajeDiscordEnCanal(sala.id, construirMensajeJustificantePago(numeroFactura, enlacePDF));
+      await actualizarNotion(factura.id, { 'Enviado a Sala': { checkbox: true } });
+      log(`FACT-${numeroFactura}: justificante de pago enviado a ${sala.nombre}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error avisando en sala de FACT-${numeroFactura}: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
@@ -1135,6 +1186,7 @@ async function main() {
   await procesarComisionSupervisor();
   await procesarCuadriculaYoutube();
   await procesarFacturas();
+  await procesarNotificacionFacturaSala();
   await procesarAcuerdosClientes();
   await procesarAcuerdosEditores();
   await procesarAsignacionSalas();
