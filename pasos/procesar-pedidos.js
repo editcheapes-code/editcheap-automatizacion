@@ -18,7 +18,9 @@
 //   8. Generar el PDF del Acuerdo de Colaboración de Clientes y Editores marcados con
 //      "Generar Acuerdo" y sin "Enlace Acuerdo" (mismo mecanismo que las facturas).
 //   9. Asignar una Sala de Reunión de Discord a cada pedido con cliente, dar acceso al
-//      editor cuando se le asigna, y liberar la sala cuando el pedido se finaliza.
+//      editor cuando se le asigna, y liberar la sala cuando el pedido se finaliza. En cuanto
+//      Jorge rellena los enlaces de subida/descarga de material del cliente en Notion, se
+//      manda un mensaje con ellos a la sala (una sola vez).
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -955,7 +957,12 @@ async function procesarAsignacionSalas() {
       const enlaceDescarga = cliente.properties['Enlace para Descargar Entregas'].url;
 
       await concederAccesoSala(sala.id, discordId);
-      await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] } });
+      await actualizarNotion(pedido.pageId, {
+        'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] },
+        // Si ya había enlaces rellenados en Notion, el mensaje de bienvenida ya los incluye
+        // -> se marca como enviado para que la fase de enlaces no lo repita.
+        'Enlaces Material Enviados': { checkbox: Boolean(enlaceSubida || enlaceDescarga) },
+      });
       await enviarMensajeDiscordEnCanal(
         sala.id,
         construirMensajeBienvenidaSala(discordId, pedido.numeroPedido, enlaceSubida, enlaceDescarga)
@@ -1065,6 +1072,60 @@ async function procesarLiberacionSalas() {
   }
 }
 
+function construirMensajeEnlacesMaterial(enlaceSubida, enlaceDescarga) {
+  const lineaSubida = enlaceSubida ? `📤 Sube aquí tu material para el editor: ${enlaceSubida}\n` : '';
+  const lineaDescarga = enlaceDescarga ? `📥 Descarga aquí tus entregas finales: ${enlaceDescarga}\n` : '';
+  return (
+    `${SEPARADOR}\n` +
+    '📁 ENLACES PARA TU MATERIAL 📁\n\n' +
+    `${lineaSubida}${lineaDescarga}\n` +
+    'Puedes usarlos cuando quieras, no hace falta esperar a ninguna reunión. Si tienes cualquier duda sobre ' +
+    'cómo subir o descargar, escribe en el canal de #tickets-soporte.\n' +
+    `${SEPARADOR}`
+  );
+}
+
+async function obtenerPedidosParaNotificarEnlaces() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Sala de Reunión', rich_text: { is_not_empty: true } },
+      { property: 'Enlaces Material Enviados', checkbox: { equals: false } },
+      { property: 'Estado del pedido', status: { does_not_equal: '7. Finalizado y Entregado' } },
+    ],
+  });
+  return resultados.map((pedido) => ({
+    pageId: pedido.id,
+    numeroPedido: pedido.properties['Nº de Pedido'].unique_id.number,
+    salaNombre: textoDe(pedido.properties['Sala de Reunión']),
+    clienteId: primerIdRelacion(pedido.properties['Cliente']),
+  }));
+}
+
+async function procesarNotificacionEnlacesMaterial() {
+  const pedidos = await obtenerPedidosParaNotificarEnlaces();
+  log(`Pedidos pendientes de comprobar enlaces de material: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      if (!pedido.clienteId) continue;
+      const sala = SALAS_REUNION.find((s) => s.nombre === pedido.salaNombre);
+      if (!sala) continue;
+
+      const cliente = await obtenerPaginaNotion(pedido.clienteId);
+      const enlaceSubida = cliente.properties['Enlace para Subir Material'].url;
+      const enlaceDescarga = cliente.properties['Enlace para Descargar Entregas'].url;
+      if (!enlaceSubida && !enlaceDescarga) continue; // aún no los ha rellenado Jorge, se reintenta la próxima vez
+
+      await enviarMensajeDiscordEnCanal(sala.id, construirMensajeEnlacesMaterial(enlaceSubida, enlaceDescarga));
+      await actualizarNotion(pedido.pageId, { 'Enlaces Material Enviados': { checkbox: true } });
+      log(`PED-${pedido.numeroPedido}: enlaces de material enviados a ${sala.nombre}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error notificando enlaces de material de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
@@ -1077,6 +1138,7 @@ async function main() {
   await procesarAcuerdosEditores();
   await procesarAsignacionSalas();
   await procesarAccesoEditorSala();
+  await procesarNotificacionEnlacesMaterial();
   await procesarLiberacionSalas();
   log('Terminado.');
 }
