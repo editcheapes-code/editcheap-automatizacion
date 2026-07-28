@@ -959,6 +959,7 @@ async function procesarAsignacionSalas() {
       await concederAccesoSala(sala.id, discordId);
       await actualizarNotion(pedido.pageId, {
         'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] },
+        'Canal Discord': { url: `https://discord.com/channels/${DISCORD_GUILD_ID}/${sala.id}` },
         // Si ya había enlaces rellenados en Notion, el mensaje de bienvenida ya los incluye
         // -> se marca como enviado para que la fase de enlaces no lo repita.
         'Enlaces Material Enviados': { checkbox: Boolean(enlaceSubida || enlaceDescarga) },
@@ -1045,7 +1046,7 @@ async function procesarLiberacionSalas() {
     try {
       const sala = SALAS_REUNION.find((s) => s.nombre === pedido.salaNombre);
       if (!sala) {
-        await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] } });
+        await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] }, 'Canal Discord': { url: null } });
         continue;
       }
 
@@ -1063,7 +1064,7 @@ async function procesarLiberacionSalas() {
         await quitarAccesoSala(sala.id, discordId);
         await esperar(500);
       }
-      await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] } });
+      await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] }, 'Canal Discord': { url: null } });
       log(`PED-${pedido.numeroPedido}: liberada ${sala.nombre} (${idsAQuitar.length} acceso(s) retirado(s))`);
       await esperar(1000);
     } catch (err) {
