@@ -152,6 +152,14 @@ async function enviarMensajeDiscord(contenido) {
   return data.id;
 }
 
+async function enviarMensajeDiscordEnCanal(channelId, contenido) {
+  const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
+  const response = await fetch(url, { method: 'POST', headers: headersDiscord(), body: JSON.stringify({ content: contenido }) });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error enviando a Discord: ' + JSON.stringify(data));
+  return data.id;
+}
+
 async function editarMensajeDiscord(mensajeId, body) {
   const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${mensajeId}`;
   const response = await fetch(url, { method: 'PATCH', headers: headersDiscord(), body: JSON.stringify(body) });
@@ -222,6 +230,20 @@ function construirMensajeOferta(pedido, importeEditor) {
     '⚠️ Nota: Por políticas de privacidad, los datos del cliente y el material original se gestionan de forma privada una vez asignado el cargo y verificado el correspondiente acuerdo de colaboración firmado.\n\n' +
     '🎯 ¿TE INTERESA ESTA COLABORACIÓN?\n' +
     'Usa la función "Responder" de Discord sobre ESTE mensaje (no escribas un mensaje nuevo en el canal) para apuntarte. Se asigna al primero que responda así. ¡A por ello! 💪\n' +
+    `${SEPARADOR}`
+  );
+}
+
+function construirMensajeBienvenidaSala(discordId, numeroPedido) {
+  return (
+    `${SEPARADOR}\n` +
+    `<@${discordId}>\n\n` +
+    '🎥 ¡BIENVENIDO/A A TU SALA DE REUNIONES! 🎥\n\n' +
+    `📌 Pedido: PED-${numeroPedido}\n\n` +
+    'Esta sala es privada: solo tú y el equipo de EDITCHEAP asignado a tu proyecto podéis entrar y veros aquí.\n\n' +
+    '🎙️ Cuando quieras hacer una videollamada con tu editor, entra aquí por voz cuando os venga bien a los dos.\n' +
+    '💬 Si tienes cualquier duda mientras tanto, escribe en el canal de #tickets-soporte.\n\n' +
+    '¡Bienvenido/a y gracias por confiar en EDITCHEAP! 👋\n' +
     `${SEPARADOR}`
   );
 }
@@ -927,7 +949,8 @@ async function procesarAsignacionSalas() {
       }
       await concederAccesoSala(sala.id, discordId);
       await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] } });
-      log(`PED-${pedido.numeroPedido}: asignada ${sala.nombre} al cliente "${tagCliente}"`);
+      await enviarMensajeDiscordEnCanal(sala.id, construirMensajeBienvenidaSala(discordId, pedido.numeroPedido));
+      log(`PED-${pedido.numeroPedido}: asignada ${sala.nombre} al cliente "${tagCliente}", mensaje de bienvenida enviado`);
       await esperar(1000);
     } catch (err) {
       log(`Error asignando sala a PED-${pedido.numeroPedido}: ${err.message}`);
