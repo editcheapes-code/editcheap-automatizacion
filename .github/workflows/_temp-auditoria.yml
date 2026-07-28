@@ -11,6 +11,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: node pasos/_temp-fix-bot-acceso.js
+      - run: node pasos/_temp-fix-kero86.js
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
