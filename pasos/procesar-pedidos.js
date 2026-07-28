@@ -22,6 +22,11 @@
 //      Jorge rellena los enlaces de subida/descarga de material del cliente en Notion, se
 //      manda un mensaje con ellos a la sala (una sola vez). Cuando el PDF de una factura de
 //      Cliente ya está generado, se avisa también en la sala de su pedido con el enlace.
+//      Cuando el Acuerdo de un Cliente está listo, se avisa en su sala; el del Editor se
+//      manda por mensaje directo de Discord (los editores no tienen sala propia).
+//  10. Generar una Factura (Cliente o Editor) directamente desde el Pedido, marcando
+//      "Generar Factura Cliente"/"Generar Factura Editor" — evita tener que ir a la base de
+//      datos de Facturas a crearla a mano.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -153,6 +158,17 @@ async function enviarMensajeDiscord(contenido) {
   const data = await response.json();
   if (!response.ok) throw new Error('Error enviando a Discord: ' + JSON.stringify(data));
   return data.id;
+}
+
+async function enviarMensajeDirectoDiscord(discordUserId, contenido) {
+  const crear = await fetch('https://discord.com/api/v10/users/@me/channels', {
+    method: 'POST',
+    headers: headersDiscord(),
+    body: JSON.stringify({ recipient_id: discordUserId }),
+  });
+  const dm = await crear.json();
+  if (!crear.ok) throw new Error('Error abriendo DM de Discord: ' + JSON.stringify(dm));
+  return enviarMensajeDiscordEnCanal(dm.id, contenido);
 }
 
 async function enviarMensajeDiscordEnCanal(channelId, contenido) {
@@ -1178,6 +1194,173 @@ async function procesarNotificacionFacturaSala() {
   }
 }
 
+function construirMensajeAcuerdoCliente(discordId, enlaceAcuerdo) {
+  return (
+    `${SEPARADOR}\n` +
+    `<@${discordId}>\n\n` +
+    '📄 TU ACUERDO DE COLABORACIÓN YA ESTÁ LISTO 📄\n\n' +
+    `${enlaceAcuerdo}\n\n` +
+    'Puedes revisarlo y firmarlo cuando quieras. Si tienes cualquier duda, escribe en el canal de #tickets-soporte.\n' +
+    `${SEPARADOR}`
+  );
+}
+
+function construirMensajeAcuerdoEditor(enlaceAcuerdo) {
+  return (
+    `${SEPARADOR}\n` +
+    '📄 TU ACUERDO DE COLABORACIÓN YA ESTÁ LISTO 📄\n\n' +
+    `${enlaceAcuerdo}\n\n` +
+    'Puedes revisarlo y firmarlo cuando quieras. Si tienes cualquier duda, pregunta por el canal correspondiente.\n' +
+    `${SEPARADOR}`
+  );
+}
+
+async function obtenerPedidosParaAvisarAcuerdoCliente() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Sala de Reunión', rich_text: { is_not_empty: true } },
+      { property: 'Acuerdo Enviado a Sala', checkbox: { equals: false } },
+      { property: 'Estado del pedido', status: { does_not_equal: '7. Finalizado y Entregado' } },
+    ],
+  });
+  return resultados.map((pedido) => ({
+    pageId: pedido.id,
+    numeroPedido: pedido.properties['Nº de Pedido'].unique_id.number,
+    salaNombre: textoDe(pedido.properties['Sala de Reunión']),
+    clienteId: primerIdRelacion(pedido.properties['Cliente']),
+  }));
+}
+
+async function procesarAvisoAcuerdoCliente() {
+  const pedidos = await obtenerPedidosParaAvisarAcuerdoCliente();
+  log(`Pedidos pendientes de comprobar aviso de Acuerdo del cliente: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      if (!pedido.clienteId) continue;
+      const sala = SALAS_REUNION.find((s) => s.nombre === pedido.salaNombre);
+      if (!sala) continue;
+
+      const cliente = await obtenerPaginaNotion(pedido.clienteId);
+      const enlaceAcuerdo = cliente.properties['Enlace Acuerdo'].url;
+      const tagCliente = textoDe(cliente.properties['Tag de Discord']);
+      if (!enlaceAcuerdo || tagCliente === '(sin especificar)') continue; // se reintenta la próxima vez
+
+      const discordId = await buscarUsuarioDiscordPorTag(tagCliente);
+      if (!discordId) continue;
+
+      await enviarMensajeDiscordEnCanal(sala.id, construirMensajeAcuerdoCliente(discordId, enlaceAcuerdo));
+      await actualizarNotion(pedido.pageId, { 'Acuerdo Enviado a Sala': { checkbox: true } });
+      log(`PED-${pedido.numeroPedido}: Acuerdo del cliente avisado en ${sala.nombre}`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error avisando Acuerdo del cliente de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+async function obtenerEditoresParaAvisarAcuerdo() {
+  return consultarDataSource(NOTION_EDITORES_DATA_SOURCE_ID, {
+    and: [
+      { property: 'Enlace Acuerdo', url: { is_not_empty: true } },
+      { property: 'Acuerdo Enviado a Discord', checkbox: { equals: false } },
+      { property: 'Tag de Discord', rich_text: { is_not_empty: true } },
+    ],
+  });
+}
+
+async function procesarAvisoAcuerdoEditor() {
+  const editores = await obtenerEditoresParaAvisarAcuerdo();
+  log(`Editores pendientes de avisar de su Acuerdo por Discord: ${editores.length}`);
+
+  for (const editor of editores) {
+    const nombre = tituloDePagina(editor, 'Nombre');
+    try {
+      const tag = textoDe(editor.properties['Tag de Discord']);
+      const discordId = await buscarUsuarioDiscordPorTag(tag);
+      if (!discordId) {
+        log(`Editor "${nombre}": no se encontró en Discord a "${tag}", se omite`);
+        continue;
+      }
+      const enlaceAcuerdo = editor.properties['Enlace Acuerdo'].url;
+      await enviarMensajeDirectoDiscord(discordId, construirMensajeAcuerdoEditor(enlaceAcuerdo));
+      await actualizarNotion(editor.id, { 'Acuerdo Enviado a Discord': { checkbox: true } });
+      log(`Editor "${nombre}": Acuerdo avisado por DM de Discord`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error avisando Acuerdo al editor "${nombre}": ${err.message}`);
+    }
+  }
+}
+
+// ---------- FASE 10: generar Factura desde el propio Pedido ----------
+//
+// En vez de tener que ir a la base de datos de Facturas a crear una a mano, Jorge marca
+// "Generar Factura Cliente" o "Generar Factura Editor" directamente en el Pedido, y esto crea
+// la Factura enlazada automáticamente (con "Generar PDF" ya activado, así se genera sola).
+
+async function obtenerPedidosParaGenerarFactura(propiedadCheckbox) {
+  // No se puede filtrar por Notion si YA existe una factura de este tipo concreto (la relación
+  // "Facturas" no distingue tipos), así que se trae todo lo marcado y se comprueba a mano.
+  return consultarNotion({ property: propiedadCheckbox, checkbox: { equals: true } });
+}
+
+async function pedidoYaTieneFacturaDeTipo(pedido, tipo) {
+  const relacion = pedido.properties['Facturas'].relation || [];
+  for (const rel of relacion) {
+    const factura = await obtenerPaginaNotion(rel.id);
+    if (factura.properties['Tipo']?.select?.name === tipo) return true;
+  }
+  return false;
+}
+
+async function crearFacturaParaPedido(pedido, tipo) {
+  const url = 'https://api.notion.com/v1/pages';
+  const numeroPedido = pedido.properties['Nº de Pedido'].unique_id.number;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      parent: { data_source_id: NOTION_FACTURAS_DATA_SOURCE_ID },
+      properties: {
+        Nombre: { title: [{ text: { content: `Factura PED-${numeroPedido} (${tipo})` } }] },
+        Tipo: { select: { name: tipo } },
+        Pedido: { relation: [{ id: pedido.id }] },
+        'Generar PDF': { checkbox: true },
+      },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error creando factura en Notion: ' + JSON.stringify(data));
+  return data;
+}
+
+async function procesarGeneracionFacturasDesdeElPedido() {
+  for (const [propiedadCheckbox, tipo] of [
+    ['Generar Factura Cliente', 'Cliente'],
+    ['Generar Factura Editor', 'Editor'],
+  ]) {
+    const pedidos = await obtenerPedidosParaGenerarFactura(propiedadCheckbox);
+    log(`Pedidos pendientes de crear factura de tipo ${tipo} desde "${propiedadCheckbox}": ${pedidos.length}`);
+
+    for (const pedido of pedidos) {
+      const numeroPedido = pedido.properties['Nº de Pedido'].unique_id.number;
+      try {
+        if (await pedidoYaTieneFacturaDeTipo(pedido, tipo)) continue;
+        await crearFacturaParaPedido(pedido, tipo);
+        log(`PED-${numeroPedido}: factura de tipo ${tipo} creada, se generará el PDF en el próximo paso`);
+        await esperar(800);
+      } catch (err) {
+        log(`Error creando factura de tipo ${tipo} para PED-${numeroPedido}: ${err.message}`);
+      }
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
@@ -1189,9 +1372,12 @@ async function main() {
   await procesarNotificacionFacturaSala();
   await procesarAcuerdosClientes();
   await procesarAcuerdosEditores();
+  await procesarGeneracionFacturasDesdeElPedido();
   await procesarAsignacionSalas();
   await procesarAccesoEditorSala();
   await procesarNotificacionEnlacesMaterial();
+  await procesarAvisoAcuerdoCliente();
+  await procesarAvisoAcuerdoEditor();
   await procesarLiberacionSalas();
   log('Terminado.');
 }
