@@ -17,6 +17,8 @@
 //      a la carpeta de Google Drive compartida con la cuenta de servicio.
 //   8. Generar el PDF del Acuerdo de Colaboración de Clientes y Editores marcados con
 //      "Generar Acuerdo" y sin "Enlace Acuerdo" (mismo mecanismo que las facturas).
+//   9. Asignar una Sala de Reunión de Discord a cada pedido con cliente, dar acceso al
+//      editor cuando se le asigna, y liberar la sala cuando el pedido se finaliza.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -34,6 +36,33 @@ const GOOGLE_APPS_SCRIPT_SECRET = process.env.GOOGLE_APPS_SCRIPT_SECRET;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const YOUTUBE_UPLOADS_PLAYLIST_ID = 'UUH2mq9Bi754AFlKygVrO9Ow';
 const NOTION_PAGINAS_CON_CUADRICULA_YOUTUBE = ['39a5104661ea81e8a934e6438c60410a', '3a551046-61ea-810c-89c0-e0912bcd4e06'];
+
+const DISCORD_GUILD_ID = '1375827720235122698';
+const PERM_SALA_REUNION = 1024 + 1048576 + 2097152 + 512; // VIEW_CHANNEL + CONNECT + SPEAK + STREAM
+const KERO86_DISCORD_ID = '550072806524715058';
+const EDITCHEAP_DISCORD_ID = '1375827144046809249';
+const SALAS_REUNION = [
+  { nombre: '🎥 Sala de Reuniones 1', id: '1531621397409960046' },
+  { nombre: '🎥 Sala de Reuniones 2', id: '1531621405345452135' },
+  { nombre: '🎥 Sala de Reuniones 3', id: '1531621413205577850' },
+  { nombre: '🎥 Sala de Reuniones 4', id: '1531659234364620892' },
+  { nombre: '🎥 Sala de Reuniones 5', id: '1531659238512787496' },
+  { nombre: '🎥 Sala de Reuniones 6', id: '1531659242757558383' },
+  { nombre: '🎥 Sala de Reuniones 7', id: '1531659246884618260' },
+  { nombre: '🎥 Sala de Reuniones 8', id: '1531659251053887568' },
+  { nombre: '🎥 Sala de Reuniones 9', id: '1531659255629742252' },
+  { nombre: '🎥 Sala de Reuniones 10', id: '1531659259748679843' },
+  { nombre: '🎥 Sala de Reuniones 11', id: '1531659263913496676' },
+  { nombre: '🎥 Sala de Reuniones 12', id: '1531659268359458906' },
+  { nombre: '🎥 Sala de Reuniones 13', id: '1531659272713142372' },
+  { nombre: '🎥 Sala de Reuniones 14', id: '1531659276756582530' },
+  { nombre: '🎥 Sala de Reuniones 15', id: '1531659281181442190' },
+  { nombre: '🎥 Sala de Reuniones 16', id: '1531659286977970219' },
+  { nombre: '🎥 Sala de Reuniones 17', id: '1531659291272941598' },
+  { nombre: '🎥 Sala de Reuniones 18', id: '1531659295228166168' },
+  { nombre: '🎥 Sala de Reuniones 19', id: '1531659299976384522' },
+  { nombre: '🎥 Sala de Reuniones 20', id: '1531659304052981841' },
+];
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -800,6 +829,209 @@ async function procesarAcuerdosEditores() {
   }
 }
 
+// ---------- FASE 9: gestionar acceso a las Salas de Reunión de Discord ----------
+//
+// Cada pedido con Cliente asignado recibe una sala de voz propia (acceso solo para ese
+// cliente, no por rol, para no dejar que un cliente vea la reunión de otro). Cuando se le
+// asigna un Editor principal en Notion, ese editor recibe acceso a la misma sala. Al
+// finalizar el pedido, se retira el acceso de ambos para dejar la sala libre para otro
+// cliente. Solo kero86, la cuenta editcheap y los roles de supervisor tienen paso permanente
+// a cualquier sala (permiso puesto directamente en Discord, no lo gestiona este script).
+
+async function buscarUsuarioDiscordPorTag(tag) {
+  if (!tag) return null;
+  const url = `https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/search?query=${encodeURIComponent(tag)}&limit=5`;
+  const response = await fetch(url, { headers: headersDiscord() });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error buscando usuario de Discord: ' + JSON.stringify(data));
+  const miembro = data.find((m) => m.user.username.toLowerCase() === tag.toLowerCase());
+  return miembro ? miembro.user.id : null;
+}
+
+async function obtenerOverwritesCanal(channelId) {
+  const url = `https://discord.com/api/v10/channels/${channelId}`;
+  const response = await fetch(url, { headers: headersDiscord() });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error leyendo canal de Discord: ' + JSON.stringify(data));
+  return data.permission_overwrites || [];
+}
+
+async function concederAccesoSala(channelId, discordUserId) {
+  const url = `https://discord.com/api/v10/channels/${channelId}/permissions/${discordUserId}`;
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: headersDiscord(),
+    body: JSON.stringify({ type: 1, allow: String(PERM_SALA_REUNION), deny: '0' }),
+  });
+  if (!response.ok && response.status !== 204) {
+    throw new Error(`Error dando acceso a sala (HTTP ${response.status}): ${await response.text()}`);
+  }
+}
+
+async function quitarAccesoSala(channelId, discordUserId) {
+  const url = `https://discord.com/api/v10/channels/${channelId}/permissions/${discordUserId}`;
+  const response = await fetch(url, { method: 'DELETE', headers: headersDiscord() });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Error quitando acceso a sala (HTTP ${response.status}): ${await response.text()}`);
+  }
+}
+
+async function buscarSalaLibre() {
+  for (const sala of SALAS_REUNION) {
+    const overwrites = await obtenerOverwritesCanal(sala.id);
+    const ocupada = overwrites.some(
+      (o) => o.type === 1 && o.id !== KERO86_DISCORD_ID && o.id !== EDITCHEAP_DISCORD_ID
+    );
+    if (!ocupada) return sala;
+    await esperar(400);
+  }
+  return null;
+}
+
+async function obtenerPedidosParaAsignarSala() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Cliente', relation: { is_not_empty: true } },
+      { property: 'Sala de Reunión', rich_text: { is_empty: true } },
+      { property: 'Estado del pedido', status: { does_not_equal: '7. Finalizado y Entregado' } },
+    ],
+  });
+  return resultados.map((pedido) => ({
+    pageId: pedido.id,
+    numeroPedido: pedido.properties['Nº de Pedido'].unique_id.number,
+    clienteId: primerIdRelacion(pedido.properties['Cliente']),
+  }));
+}
+
+async function procesarAsignacionSalas() {
+  const pedidos = await obtenerPedidosParaAsignarSala();
+  log(`Pedidos pendientes de asignar sala de reunión: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      const cliente = await obtenerPaginaNotion(pedido.clienteId);
+      const tagCliente = textoDe(cliente.properties['Tag de Discord']);
+      if (tagCliente === '(sin especificar)') {
+        log(`PED-${pedido.numeroPedido}: el cliente no tiene "Tag de Discord" en Notion, se omite`);
+        continue;
+      }
+      const discordId = await buscarUsuarioDiscordPorTag(tagCliente);
+      if (!discordId) {
+        log(`PED-${pedido.numeroPedido}: no se encontró en Discord a "${tagCliente}", se omite`);
+        continue;
+      }
+      const sala = await buscarSalaLibre();
+      if (!sala) {
+        log(`PED-${pedido.numeroPedido}: no hay ninguna sala de reunión libre ahora mismo`);
+        continue;
+      }
+      await concederAccesoSala(sala.id, discordId);
+      await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [{ text: { content: sala.nombre } }] } });
+      log(`PED-${pedido.numeroPedido}: asignada ${sala.nombre} al cliente "${tagCliente}"`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error asignando sala a PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+async function obtenerPedidosParaAccesoEditor() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Sala de Reunión', rich_text: { is_not_empty: true } },
+      { property: 'Editor principal', relation: { is_not_empty: true } },
+      { property: 'Estado del pedido', status: { does_not_equal: '7. Finalizado y Entregado' } },
+    ],
+  });
+  return resultados.map((pedido) => ({
+    pageId: pedido.id,
+    numeroPedido: pedido.properties['Nº de Pedido'].unique_id.number,
+    salaNombre: textoDe(pedido.properties['Sala de Reunión']),
+    editorId: primerIdRelacion(pedido.properties['Editor principal']),
+  }));
+}
+
+async function procesarAccesoEditorSala() {
+  const pedidos = await obtenerPedidosParaAccesoEditor();
+  log(`Pedidos con sala asignada, comprobando acceso del editor: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      const sala = SALAS_REUNION.find((s) => s.nombre === pedido.salaNombre);
+      if (!sala) {
+        log(`PED-${pedido.numeroPedido}: "${pedido.salaNombre}" no coincide con ninguna sala conocida`);
+        continue;
+      }
+      const editor = await obtenerPaginaNotion(pedido.editorId);
+      const tagEditor = textoDe(editor.properties['Tag de Discord']);
+      if (tagEditor === '(sin especificar)') continue;
+      const discordId = await buscarUsuarioDiscordPorTag(tagEditor);
+      if (!discordId) continue;
+
+      const overwrites = await obtenerOverwritesCanal(sala.id);
+      const yaTieneAcceso = overwrites.some((o) => o.type === 1 && o.id === discordId);
+      if (yaTieneAcceso) continue;
+
+      await concederAccesoSala(sala.id, discordId);
+      log(`PED-${pedido.numeroPedido}: acceso a ${sala.nombre} concedido al editor "${tagEditor}"`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error dando acceso de sala al editor de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+async function obtenerPedidosParaLiberarSala() {
+  const resultados = await consultarNotion({
+    and: [
+      { property: 'Estado del pedido', status: { equals: '7. Finalizado y Entregado' } },
+      { property: 'Sala de Reunión', rich_text: { is_not_empty: true } },
+    ],
+  });
+  return resultados.map((pedido) => ({
+    pageId: pedido.id,
+    numeroPedido: pedido.properties['Nº de Pedido'].unique_id.number,
+    salaNombre: textoDe(pedido.properties['Sala de Reunión']),
+    clienteId: primerIdRelacion(pedido.properties['Cliente']),
+    editorId: primerIdRelacion(pedido.properties['Editor principal']),
+  }));
+}
+
+async function procesarLiberacionSalas() {
+  const pedidos = await obtenerPedidosParaLiberarSala();
+  log(`Pedidos finalizados pendientes de liberar sala: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    try {
+      const sala = SALAS_REUNION.find((s) => s.nombre === pedido.salaNombre);
+      if (!sala) {
+        await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] } });
+        continue;
+      }
+
+      const idsAQuitar = [];
+      for (const id of [pedido.clienteId, pedido.editorId]) {
+        if (!id) continue;
+        const pagina = await obtenerPaginaNotion(id);
+        const tag = textoDe(pagina.properties['Tag de Discord']);
+        if (tag === '(sin especificar)') continue;
+        const discordId = await buscarUsuarioDiscordPorTag(tag);
+        if (discordId) idsAQuitar.push(discordId);
+      }
+
+      for (const discordId of idsAQuitar) {
+        await quitarAccesoSala(sala.id, discordId);
+        await esperar(500);
+      }
+      await actualizarNotion(pedido.pageId, { 'Sala de Reunión': { rich_text: [] } });
+      log(`PED-${pedido.numeroPedido}: liberada ${sala.nombre} (${idsAQuitar.length} acceso(s) retirado(s))`);
+      await esperar(1000);
+    } catch (err) {
+      log(`Error liberando sala de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await procesarPublicaciones();
   await procesarAsignaciones();
@@ -810,6 +1042,9 @@ async function main() {
   await procesarFacturas();
   await procesarAcuerdosClientes();
   await procesarAcuerdosEditores();
+  await procesarAsignacionSalas();
+  await procesarAccesoEditorSala();
+  await procesarLiberacionSalas();
   log('Terminado.');
 }
 
