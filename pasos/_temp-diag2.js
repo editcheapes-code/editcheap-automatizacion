@@ -31,7 +31,12 @@ async function main() {
   for (const [nombre, id] of Object.entries(CANALES)) {
     const res = await fetch(`https://discord.com/api/v10/channels/${id}`, { headers });
     const data = await res.json();
-    console.log(`\n#${nombre}:`, JSON.stringify({ parent_id: data.parent_id, overwrites: data.permission_overwrites }));
+    if (!res.ok) {
+      console.log(`\n#${nombre}: ERROR HTTP ${res.status} ${JSON.stringify(data)}`);
+    } else {
+      console.log(`\n#${nombre}: parent_id=${data.parent_id} overwrites=${JSON.stringify(data.permission_overwrites)}`);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
   // Comprobación cruzada: el bot ve el canal, ¿el canal responde a un fetch de mensajes? (confirma que existe y es accesible)
