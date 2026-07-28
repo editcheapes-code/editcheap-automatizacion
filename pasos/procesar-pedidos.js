@@ -27,6 +27,9 @@
 //  10. Generar una Factura (Cliente o Editor) directamente desde el Pedido, marcando
 //      "Generar Factura Cliente"/"Generar Factura Editor" — evita tener que ir a la base de
 //      datos de Facturas a crearla a mano.
+//  11. Al asignar editor, calcular "Fecha límite" = hoy + "Duración Estimada (días)" (suma de
+//      la duración de cada servicio del Catálogo, ya con margen incluido). El plazo también
+//      se muestra en la oferta de Discord antes de que el editor se apunte.
 // Cada fase guarda su resultado en Notion solo si Discord confirma éxito, así que si algo
 // falla a mitad, la siguiente ejecución simplemente reintenta ese pedido.
 //
@@ -239,13 +242,17 @@ async function borrarMensajeDiscord(mensajeId) {
 const SEPARADOR = '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬';
 
 function construirMensajeOferta(pedido, importeEditor) {
+  const lineaPlazo = pedido.duracionEstimada
+    ? `⏳ Plazo estimado: ${Math.ceil(pedido.duracionEstimada)} día(s) desde que te asignes (ya con margen)\n`
+    : '';
   return (
     `${SEPARADOR}\n` +
     '🚨 ¡NUEVA COLABORACIÓN DISPONIBLE! 🚨\n\n' +
     `📌 Nº de Pedido: PED-${pedido.numeroPedido}\n` +
     `🎬 Tipo de servicio: ${pedido.tipoServicio}\n` +
     `📝 Detalles del trabajo: ${pedido.deseoCliente}\n` +
-    `💰 Importe para el editor: ${importeEditor} €\n\n` +
+    `💰 Importe para el editor: ${importeEditor} €\n` +
+    `${lineaPlazo}\n` +
     '⚠️ Nota: Por políticas de privacidad, los datos del cliente y el material original se gestionan de forma privada una vez asignado el cargo y verificado el correspondiente acuerdo de colaboración firmado.\n\n' +
     '🎯 ¿TE INTERESA ESTA COLABORACIÓN?\n' +
     'Usa la función "Responder" de Discord sobre ESTE mensaje (no escribas un mensaje nuevo en el canal) para apuntarte. Se asigna al primero que responda así. ¡A por ello! 💪\n' +
@@ -302,6 +309,7 @@ async function obtenerPedidosParaPublicar() {
       tipoServicio: await nombresServiciosDe(p['Servicios web']),
       deseoCliente: textoDe(p['Deseo del cliente']),
       montoTotal: p['Monto total (€)'].formula.number,
+      duracionEstimada: p['Duración Estimada (días)'].rollup ? p['Duración Estimada (días)'].rollup.number : null,
     });
   }
   return pedidos;
@@ -343,8 +351,17 @@ async function obtenerPedidosParaAsignar() {
       pageId: pedido.id,
       numeroPedido: p['Nº de Pedido'].unique_id.number,
       mensajeId: textoDe(p['ID Mensaje']),
+      duracionEstimada: p['Duración Estimada (días)'].rollup ? p['Duración Estimada (días)'].rollup.number : null,
     };
   });
+}
+
+// Fecha límite = hoy + Duración Estimada (suma de "Duración estimada (días)" de los servicios
+// del pedido, ya con margen incluido en el catálogo). Formato YYYY-MM-DD para Notion.
+function calcularFechaLimite(duracionDias) {
+  const fecha = new Date();
+  fecha.setDate(fecha.getDate() + Math.ceil(duracionDias));
+  return fecha.toISOString().slice(0, 10);
 }
 
 async function procesarAsignaciones() {
@@ -364,11 +381,18 @@ async function procesarAsignaciones() {
         continue;
       }
 
-      await actualizarNotion(pedido.pageId, {
+      const propiedades = {
         'Editor principal': { relation: [{ id: editor.id }] },
         'Estado del pedido': { status: { name: '2. Reunión Agendada' } },
-      });
-      log(`PED-${pedido.numeroPedido}: asignado a ${tagDiscord}`);
+      };
+      if (pedido.duracionEstimada) {
+        propiedades['Fecha límite'] = { date: { start: calcularFechaLimite(pedido.duracionEstimada) } };
+      }
+      await actualizarNotion(pedido.pageId, propiedades);
+      log(
+        `PED-${pedido.numeroPedido}: asignado a ${tagDiscord}` +
+          (pedido.duracionEstimada ? `, fecha límite calculada (${Math.ceil(pedido.duracionEstimada)} día(s))` : '')
+      );
     } catch (err) {
       log(`Error asignando PED-${pedido.numeroPedido}: ${err.message}`);
     }
