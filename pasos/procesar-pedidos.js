@@ -722,6 +722,24 @@ async function construirDatosFactura(factura) {
   };
 }
 
+// El Apps Script a veces responde con una pagina de error HTML (login de Google, excepcion
+// no capturada, etc.) en vez de JSON. Sin esto, ese caso se veia como "Unexpected token '<'"
+// en los logs, dificil de diagnosticar. Con esto se ve claro que la respuesta no fue JSON.
+async function parsearRespuestaAppsScript(response, contexto) {
+  const texto = await response.text();
+  let data;
+  try {
+    data = JSON.parse(texto);
+  } catch {
+    throw new Error(
+      `Error ${contexto} en Drive: el Apps Script no devolvio JSON (HTTP ${response.status}). ` +
+        `Primeros 200 caracteres de la respuesta: ${texto.slice(0, 200)}`
+    );
+  }
+  if (!response.ok || data.error) throw new Error(`Error ${contexto} en Drive: ` + JSON.stringify(data));
+  return data;
+}
+
 // Genera la factura a partir de la plantilla de Google Docs (Apps Script sustituye los
 // marcadores {{...}} y exporta el resultado como PDF a la carpeta de Drive).
 async function generarFacturaEnDrive(datos, nombreArchivo) {
@@ -732,6 +750,9 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
       secreto: GOOGLE_APPS_SCRIPT_SECRET,
       carpetaId: GOOGLE_DRIVE_FOLDER_ID,
       nombreArchivo,
+      // Sin este campo, el Apps Script no distingue Factura de Acuerdo y devuelve una
+      // pagina de error HTML en vez de JSON (bug detectado en auditoria del 2026-08-04).
+      tipoDocumento: 'Factura',
       tipoFactura: datos.tipo,
       datos: {
         NUMERO_FACTURA: `FACT-${datos.numeroFactura}`,
@@ -750,8 +771,7 @@ async function generarFacturaEnDrive(datos, nombreArchivo) {
       },
     }),
   });
-  const data = await response.json();
-  if (!response.ok || data.error) throw new Error('Error generando factura en Drive: ' + JSON.stringify(data));
+  const data = await parsearRespuestaAppsScript(response, 'generando factura');
   return { url: data.url, editUrl: data.editUrl };
 }
 
@@ -834,8 +854,7 @@ async function generarAcuerdoEnDrive(tipoFactura, datos, nombreArchivo) {
       datos,
     }),
   });
-  const data = await response.json();
-  if (!response.ok || data.error) throw new Error('Error generando Acuerdo en Drive: ' + JSON.stringify(data));
+  const data = await parsearRespuestaAppsScript(response, 'generando Acuerdo');
   return { url: data.url, editUrl: data.editUrl };
 }
 
@@ -1385,25 +1404,42 @@ async function procesarGeneracionFacturasDesdeElPedido() {
   }
 }
 
+// Cada fase corre aislada: si una falla de forma inesperada (ej. un fallo de red puntual,
+// un campo que no existe todavia en Notion), las demas fases de esta misma ejecucion se
+// siguen ejecutando igual, en vez de saltarse todo el resto como pasaba antes. El proceso
+// sigue terminando con codigo de error si alguna fase fallo, para que se dispare el aviso de
+// Discord de "la automatizacion ha fallado" y no pase desapercibido.
+async function ejecutarFase(nombre, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    log(`Error inesperado en la fase "${nombre}": ${err.stack || err.message}`);
+    process.exitCode = 1;
+  }
+}
+
 async function main() {
-  await procesarPublicaciones();
-  await procesarAsignaciones();
-  await procesarCierres();
-  await procesarBorrados();
-  await procesarComisionSupervisor();
-  await procesarCuadriculaYoutube();
-  await procesarFacturas();
-  await procesarNotificacionFacturaSala();
-  await procesarAcuerdosClientes();
-  await procesarAcuerdosEditores();
-  await procesarGeneracionFacturasDesdeElPedido();
-  await procesarAsignacionSalas();
-  await procesarAccesoEditorSala();
-  await procesarNotificacionEnlacesMaterial();
-  await procesarAvisoAcuerdoCliente();
-  await procesarAvisoAcuerdoEditor();
-  await procesarLiberacionSalas();
+  await ejecutarFase('publicaciones', procesarPublicaciones);
+  await ejecutarFase('asignaciones', procesarAsignaciones);
+  await ejecutarFase('cierres', procesarCierres);
+  await ejecutarFase('borrados', procesarBorrados);
+  await ejecutarFase('comision supervisor', procesarComisionSupervisor);
+  await ejecutarFase('cuadricula YouTube', procesarCuadriculaYoutube);
+  await ejecutarFase('facturas', procesarFacturas);
+  await ejecutarFase('notificacion factura sala', procesarNotificacionFacturaSala);
+  await ejecutarFase('acuerdos clientes', procesarAcuerdosClientes);
+  await ejecutarFase('acuerdos editores', procesarAcuerdosEditores);
+  await ejecutarFase('generacion facturas desde pedido', procesarGeneracionFacturasDesdeElPedido);
+  await ejecutarFase('asignacion salas', procesarAsignacionSalas);
+  await ejecutarFase('acceso editor sala', procesarAccesoEditorSala);
+  await ejecutarFase('notificacion enlaces material', procesarNotificacionEnlacesMaterial);
+  await ejecutarFase('aviso acuerdo cliente', procesarAvisoAcuerdoCliente);
+  await ejecutarFase('aviso acuerdo editor', procesarAvisoAcuerdoEditor);
+  await ejecutarFase('liberacion salas', procesarLiberacionSalas);
   log('Terminado.');
 }
 
-main();
+main().catch((err) => {
+  log(`Error fatal no controlado: ${err.stack || err.message}`);
+  process.exitCode = 1;
+});
