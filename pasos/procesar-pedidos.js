@@ -118,19 +118,7 @@ async function nombresServiciosDe(propiedadRelacion) {
 }
 
 async function consultarNotion(filter) {
-  const url = `https://api.notion.com/v1/data_sources/${NOTION_DATA_SOURCE_ID}/query`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      'Notion-Version': '2025-09-03',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ filter }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error('Error consultando Notion: ' + JSON.stringify(data));
-  return data.results;
+  return consultarDataSource(NOTION_DATA_SOURCE_ID, filter);
 }
 
 async function actualizarNotion(pageId, properties) {
@@ -843,18 +831,24 @@ async function obtenerEditoresParaAcuerdo() {
 
 async function consultarDataSource(dataSourceId, filter) {
   const url = `https://api.notion.com/v1/data_sources/${dataSourceId}/query`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      'Notion-Version': '2025-09-03',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ filter }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error('Error consultando Notion: ' + JSON.stringify(data));
-  return data.results;
+  const resultados = [];
+  let startCursor;
+  do {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${NOTION_TOKEN}`,
+        'Notion-Version': '2025-09-03',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ filter, start_cursor: startCursor }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error('Error consultando Notion: ' + JSON.stringify(data));
+    resultados.push(...data.results);
+    startCursor = data.has_more ? data.next_cursor : undefined;
+  } while (startCursor);
+  return resultados;
 }
 
 async function generarAcuerdoEnDrive(tipoFactura, datos, nombreArchivo) {
@@ -1153,6 +1147,128 @@ async function procesarLiberacionSalas() {
       await esperar(1000);
     } catch (err) {
       log(`Error liberando sala de PED-${pedido.numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+const NOTION_METRICAS_DATA_SOURCE_ID = 'bc886fe4-96a5-4f83-b694-311455f735cd';
+
+function fechaDeHoyIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function mesDeFechaIso(fechaIso) {
+  return fechaIso.slice(0, 7);
+}
+
+// Cuando un pedido llega a "Finalizado y Entregado" se guarda la fecha una sola vez, para poder
+// calcular despues cuanto se tarda de media en entregar (createdTime -> Fecha de finalizacion) y
+// en que mes contarlo para las Metricas.
+async function procesarFechaFinalizacion() {
+  const pedidos = await consultarNotion({
+    and: [
+      { property: 'Estado del pedido', status: { equals: '7. Finalizado y Entregado' } },
+      { property: 'Fecha de finalización', date: { is_empty: true } },
+    ],
+  });
+  log(`Pedidos finalizados pendientes de guardar fecha de finalización: ${pedidos.length}`);
+
+  for (const pedido of pedidos) {
+    const numeroPedido = pedido.properties['Nº de Pedido'].unique_id.number;
+    try {
+      await actualizarNotion(pedido.id, { 'Fecha de finalización': { date: { start: fechaDeHoyIso() } } });
+      log(`PED-${numeroPedido}: fecha de finalización guardada`);
+    } catch (err) {
+      log(`Error guardando fecha de finalización de PED-${numeroPedido}: ${err.message}`);
+    }
+  }
+}
+
+async function obtenerFilaMetricasDelMes(mes) {
+  const resultados = await consultarDataSource(NOTION_METRICAS_DATA_SOURCE_ID, {
+    property: 'Mes (AAAA-MM)',
+    title: { equals: mes },
+  });
+  return resultados[0] || null;
+}
+
+async function guardarMetricasDelMes(mes, campos) {
+  const fila = await obtenerFilaMetricasDelMes(mes);
+  if (fila) {
+    await actualizarNotion(fila.id, campos);
+    return;
+  }
+  const url = 'https://api.notion.com/v1/pages';
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': '2025-09-03',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      parent: { data_source_id: NOTION_METRICAS_DATA_SOURCE_ID },
+      properties: { 'Mes (AAAA-MM)': { title: [{ text: { content: mes } }] }, ...campos },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error('Error creando fila de Métricas en Notion: ' + JSON.stringify(data));
+}
+
+// Recalcula, para cada mes con datos, "Pedidos completados" y "Tiempo medio de entrega (días)" a
+// partir de los pedidos finalizados, e "Ingresos (€)" a partir de las facturas de cliente ya
+// marcadas como pagadas. Nunca toca "Gastos (€)" (sigue siendo manual) ni "Beneficio (€)" (formula
+// de solo lectura).
+async function procesarMetricasMensuales() {
+  const pedidosFinalizados = await consultarNotion({
+    property: 'Fecha de finalización',
+    date: { is_not_empty: true },
+  });
+
+  const statsPorMes = new Map();
+  for (const pedido of pedidosFinalizados) {
+    const fechaFin = pedido.properties['Fecha de finalización'].date.start;
+    const mes = mesDeFechaIso(fechaFin);
+    const dias = (new Date(fechaFin) - new Date(pedido.created_time)) / 86400000;
+    const stats = statsPorMes.get(mes) || { completados: 0, diasTotales: 0 };
+    stats.completados += 1;
+    stats.diasTotales += Math.max(dias, 0);
+    statsPorMes.set(mes, stats);
+  }
+
+  const facturasPagadas = await consultarDataSource(NOTION_FACTURAS_DATA_SOURCE_ID, {
+    and: [
+      { property: 'Tipo', select: { equals: 'Cliente' } },
+      { property: 'Estado', select: { equals: 'Pagada' } },
+      { property: 'Fecha', date: { is_not_empty: true } },
+    ],
+  });
+
+  const ingresosPorMes = new Map();
+  for (const factura of facturasPagadas) {
+    const mes = mesDeFechaIso(factura.properties['Fecha'].date.start);
+    const importe = factura.properties['Importe (€)'].formula.number || 0;
+    ingresosPorMes.set(mes, (ingresosPorMes.get(mes) || 0) + importe);
+  }
+
+  const meses = new Set([...statsPorMes.keys(), ...ingresosPorMes.keys()]);
+  log(`Meses con datos para recalcular en Métricas: ${meses.size}`);
+
+  for (const mes of meses) {
+    try {
+      const campos = {};
+      const stats = statsPorMes.get(mes);
+      if (stats) {
+        campos['Pedidos completados'] = { number: stats.completados };
+        campos['Tiempo medio de entrega (días)'] = { number: Math.round((stats.diasTotales / stats.completados) * 10) / 10 };
+      }
+      const ingresos = ingresosPorMes.get(mes);
+      if (ingresos !== undefined) {
+        campos['Ingresos (€)'] = { number: Math.round(ingresos * 100) / 100 };
+      }
+      await guardarMetricasDelMes(mes, campos);
+    } catch (err) {
+      log(`Error actualizando Métricas de ${mes}: ${err.message}`);
     }
   }
 }
@@ -1460,6 +1576,8 @@ async function main() {
   await ejecutarFase('aviso acuerdo cliente', procesarAvisoAcuerdoCliente);
   await ejecutarFase('aviso acuerdo editor', procesarAvisoAcuerdoEditor);
   await ejecutarFase('liberacion salas', procesarLiberacionSalas);
+  await ejecutarFase('fecha de finalizacion', procesarFechaFinalizacion);
+  await ejecutarFase('metricas mensuales', procesarMetricasMensuales);
   log('Terminado.');
 }
 
