@@ -41,6 +41,7 @@ const NOTION_EDITORES_DATA_SOURCE_ID = '39151046-61ea-80a0-b77d-000b5e2875d8';
 const NOTION_FACTURAS_DATA_SOURCE_ID = '974452ae-34ca-4d1c-9b8a-a177dda689fb';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const DISCORD_ALERT_CHANNEL_ID = process.env.DISCORD_ALERT_CHANNEL_ID;
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL;
 const GOOGLE_APPS_SCRIPT_SECRET = process.env.GOOGLE_APPS_SCRIPT_SECRET;
@@ -182,6 +183,15 @@ async function enviarMensajeDiscordEnCanal(channelId, contenido) {
   return data.id;
 }
 
+async function enviarAlertaInterna(contenido) {
+  if (!DISCORD_ALERT_CHANNEL_ID) return;
+  try {
+    await enviarMensajeDiscordEnCanal(DISCORD_ALERT_CHANNEL_ID, contenido);
+  } catch (err) {
+    log(`No se pudo enviar aviso interno a Discord: ${err.message}`);
+  }
+}
+
 async function editarMensajeDiscord(mensajeId, body) {
   const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${mensajeId}`;
   const response = await fetch(url, { method: 'PATCH', headers: headersDiscord(), body: JSON.stringify(body) });
@@ -202,9 +212,20 @@ async function obtenerRespuestas(mensajeId) {
     .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
 }
 
-async function obtenerPrimeraRespuesta(mensajeId) {
+// Antes esto solo miraba la respuesta mas antigua y paraba ahi: si esa primera respuesta no
+// era de un editor activo registrado, la oferta quedaba bloqueada para siempre (ni un editor
+// valido que respondiera despues podia ser asignado, porque siempre se volvia a mirar esa
+// misma primera respuesta invalida). Ahora recorre las respuestas en orden y se queda con la
+// primera que SI corresponda a un editor activo registrado (bug detectado en auditoria del
+// 2026-08-04).
+async function buscarPrimeraRespuestaDeEditorValido(mensajeId) {
   const respuestas = await obtenerRespuestas(mensajeId);
-  return respuestas[0] || null;
+  for (const respuesta of respuestas) {
+    const tagDiscord = respuesta.author.username;
+    const editor = await buscarEditorPorTagDiscord(tagDiscord);
+    if (editor) return { respuesta, editor, tagDiscord };
+  }
+  return null;
 }
 
 async function buscarEditorPorTagDiscord(tagDiscord) {
@@ -370,16 +391,11 @@ async function procesarAsignaciones() {
 
   for (const pedido of pedidos) {
     try {
-      const respuesta = await obtenerPrimeraRespuesta(pedido.mensajeId);
+      const encontrado = await buscarPrimeraRespuestaDeEditorValido(pedido.mensajeId);
       await esperar(1500); // evitar "rate limited" de Discord al encadenar comprobaciones
-      if (!respuesta) continue;
+      if (!encontrado) continue;
 
-      const tagDiscord = respuesta.author.username;
-      const editor = await buscarEditorPorTagDiscord(tagDiscord);
-      if (!editor) {
-        log(`PED-${pedido.numeroPedido}: respondió "${tagDiscord}" pero no es un editor activo registrado, se ignora`);
-        continue;
-      }
+      const { editor, tagDiscord } = encontrado;
 
       const propiedades = {
         'Editor principal': { relation: [{ id: editor.id }] },
@@ -994,6 +1010,7 @@ async function obtenerPedidosParaAsignarSala() {
 async function procesarAsignacionSalas() {
   const pedidos = await obtenerPedidosParaAsignarSala();
   log(`Pedidos pendientes de asignar sala de reunión: ${pedidos.length}`);
+  const pedidosSinSala = [];
 
   for (const pedido of pedidos) {
     try {
@@ -1011,6 +1028,7 @@ async function procesarAsignacionSalas() {
       const sala = await buscarSalaLibre();
       if (!sala) {
         log(`PED-${pedido.numeroPedido}: no hay ninguna sala de reunión libre ahora mismo`);
+        pedidosSinSala.push(pedido.numeroPedido);
         continue;
       }
       const enlaceSubida = cliente.properties['Enlace para Subir Material'].url;
@@ -1033,6 +1051,12 @@ async function procesarAsignacionSalas() {
     } catch (err) {
       log(`Error asignando sala a PED-${pedido.numeroPedido}: ${err.message}`);
     }
+  }
+
+  if (pedidosSinSala.length > 0) {
+    await enviarAlertaInterna(
+      `⚠️ No hay salas de reunión libres. Pedido(s) pendiente(s) de asignar: ${pedidosSinSala.map((n) => `PED-${n}`).join(', ')}.`
+    );
   }
 }
 

@@ -23,6 +23,7 @@ jobs:
           GOOGLE_APPS_SCRIPT_URL: ${{ secrets.GOOGLE_APPS_SCRIPT_URL }}
           GOOGLE_APPS_SCRIPT_SECRET: ${{ secrets.GOOGLE_APPS_SCRIPT_SECRET }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          DISCORD_ALERT_CHANNEL_ID: ${{ secrets.DISCORD_ALERT_CHANNEL_ID }}
       - run: npm install
       - run: node pasos/crear-carpetas-cloud.js
         env:
