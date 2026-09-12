@@ -16,4 +16,18 @@ describe("externalIdentityId", () => {
       "invalid external identity id",
     );
   });
+
+  it("accepts a 255-character provider identity", () => {
+    const maximumLengthIdentity = "a".repeat(255);
+
+    expect(externalIdentityId(maximumLengthIdentity)).toBe(
+      maximumLengthIdentity,
+    );
+  });
+
+  it("rejects a 256-character provider identity", () => {
+    expect(() => externalIdentityId("a".repeat(256))).toThrow(
+      "invalid external identity id",
+    );
+  });
 });
