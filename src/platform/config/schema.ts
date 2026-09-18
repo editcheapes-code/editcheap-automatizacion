@@ -3,17 +3,14 @@ import { z } from "zod";
 const environmentNameSchema = z.enum(["development", "staging", "production"]);
 const capabilityOwnerSchema = z.enum(["legacy", "replacement", "disabled"]);
 
-const databaseUrlSchema = z
-  .string()
-  .url()
-  .refine((value) => {
-    try {
-      const protocol = new URL(value).protocol;
-      return protocol === "postgres:" || protocol === "postgresql:";
-    } catch {
-      return false;
-    }
-  });
+const databaseUrlSchema = z.url().refine((value) => {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "postgres:" || protocol === "postgresql:";
+  } catch {
+    return false;
+  }
+});
 
 const portSchema = z
   .string()

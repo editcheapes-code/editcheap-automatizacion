@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const entityIdSchema = z.string().uuid({ error: "invalid entity id" });
+const entityIdSchema = z.uuid({ error: "invalid entity id" });
 const externalIdentityIdSchema = z
   .string()
   .min(1, { error: "invalid external identity id" })
