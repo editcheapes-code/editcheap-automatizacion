@@ -1,49 +1,33 @@
-import type { z } from "zod";
+import { loadEnv } from "./load-env.js";
 import { runtimeConfigSchema } from "./schema.js";
 import type { AppConfig } from "./types.js";
 
-function formatValidationError(error: z.ZodError): string {
-  const fields = [
-    ...new Set(
-      error.issues.map((issue) =>
-        issue.path.length === 0 ? "configuration" : issue.path.join("."),
-      ),
-    ),
-  ];
-
-  return `invalid runtime configuration: ${fields.join(", ")}`;
-}
-
 export function loadConfig(environment: NodeJS.ProcessEnv): AppConfig {
-  const result = runtimeConfigSchema.safeParse(environment);
-
-  if (!result.success) {
-    throw new Error(formatValidationError(result.error));
-  }
+  const env = loadEnv(runtimeConfigSchema, environment);
 
   const config: AppConfig = {
-    environment: result.data.NODE_ENV,
-    databaseUrl: result.data.DATABASE_URL,
+    environment: env.NODE_ENV,
+    databaseUrl: env.DATABASE_URL,
     http: Object.freeze({
-      host: result.data.HTTP_HOST,
-      port: result.data.HTTP_PORT,
+      host: env.HTTP_HOST,
+      port: env.HTTP_PORT,
     }),
     notion: Object.freeze({
-      token: result.data.NOTION_TOKEN,
-      contractVersion: result.data.NOTION_CONTRACT_VERSION,
-      operatorUserIds: Object.freeze([...result.data.NOTION_OPERATOR_USER_IDS]),
+      token: env.NOTION_TOKEN,
+      contractVersion: env.NOTION_CONTRACT_VERSION,
+      operatorUserIds: Object.freeze([...env.NOTION_OPERATOR_USER_IDS]),
     }),
     discord: Object.freeze({
-      token: result.data.DISCORD_TOKEN,
-      applicationId: result.data.DISCORD_APPLICATION_ID,
-      guildId: result.data.DISCORD_GUILD_ID,
+      token: env.DISCORD_TOKEN,
+      applicationId: env.DISCORD_APPLICATION_ID,
+      guildId: env.DISCORD_GUILD_ID,
     }),
-    capabilities: Object.freeze({ ...result.data.CAPABILITY_OWNERSHIP }),
+    capabilities: Object.freeze({ ...env.CAPABILITY_OWNERSHIP }),
     retentionDays: Object.freeze({
-      inbox: result.data.RETENTION_INBOX_DAYS,
-      audit: result.data.RETENTION_AUDIT_DAYS,
-      operations: result.data.RETENTION_OPERATIONS_DAYS,
-      documents: result.data.RETENTION_DOCUMENTS_DAYS,
+      inbox: env.RETENTION_INBOX_DAYS,
+      audit: env.RETENTION_AUDIT_DAYS,
+      operations: env.RETENTION_OPERATIONS_DAYS,
+      documents: env.RETENTION_DOCUMENTS_DAYS,
     }),
   };
 
